@@ -250,10 +250,24 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
 
     const i32 induction_iterations = std::max(params_.induction_iterations, 0);
     for (i32 i = 0; i < induction_iterations; ++i) {
-        // Scene drive field: permanent magnets + induced soft SDF only.
-        // MPM motion reads this field so particles do not collapse under
-        // their own reflected magnetization.
+        // Scene drive field: permanent magnets + induced soft SDF. On the final
+        // induction iteration we fold in particle (ferrofluid) magnetization so
+        // the drive field particles actually read contains the demagnetizing
+        // contribution from the fluid itself. Without this the Rosensweig spike
+        // spacing is not self-regulated — spikes can pack denser than physical
+        // or collapse under perturbation because there's no magnetic volume cost.
         rasterize_magnetization(true, drive_field_tex_);
+        if (i == induction_iterations - 1) {
+            rasterize_particle_magnetization(drive_field_tex_);
+        }
+        solve_field_from_magnetization(drive_field_tex_);
+    }
+
+    // If the user configured zero induction iterations, still add one pass that
+    // folds in particle magnetization so drive includes demag feedback.
+    if (induction_iterations == 0) {
+        rasterize_magnetization(true, drive_field_tex_);
+        rasterize_particle_magnetization(drive_field_tex_);
         solve_field_from_magnetization(drive_field_tex_);
     }
 

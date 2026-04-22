@@ -477,7 +477,13 @@ void main() {
                     }
 
                     if (u_enable_thermal == 1) {
-                        float mix_w = mass_j / max(rho_j, 1.0) * w * thermal_mix_scale;
+                        // Symmetric (reciprocal) thermal weight: dividing by rho_j alone
+                        // biased heat transfer toward high-density neighbors and prevented
+                        // multi-phase systems (e.g. hot air vs cold SPH water) from ever
+                        // reaching thermal equilibrium. Averaging rho_i and rho_j gives
+                        // equal-and-opposite heat flow between particles.
+                        float rho_bar = max(0.5 * (rho_i + rho_j), 1.0);
+                        float mix_w = mass_j / rho_bar * w * thermal_mix_scale;
                         temp_mix += (temp_j - temp_i) * mix_w;
                         temp_weight += mix_w;
                     }

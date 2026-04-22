@@ -94,46 +94,50 @@ void main() {
     float heat_capacity = in_solid ? max(u_solid_heat_capacity * prop_c.y, 0.1) : 1.0;
     float T0 = T;
 
-    if (u_physically_based_heat == 1) {
-        float coeff_l = clamp(k_l * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
-        float coeff_r = clamp(k_r * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
-        float coeff_d = clamp(k_d * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
-        float coeff_u = clamp(k_u * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
-        float coeff_sum = coeff_l + coeff_r + coeff_d + coeff_u;
-        if (coeff_sum > 0.96) {
-            float scale = 0.96 / coeff_sum;
-            coeff_l *= scale;
-            coeff_r *= scale;
-            coeff_d *= scale;
-            coeff_u *= scale;
-        }
-        T = T0
-          + coeff_l * (T_l - T0)
-          + coeff_r * (T_r - T0)
-          + coeff_d * (T_d - T0)
-          + coeff_u * (T_u - T0);
-    } else {
-        float diffusion = (
-            k_l * (T_l - T0) +
-            k_r * (T_r - T0) +
-            k_d * (T_d - T0) +
-            k_u * (T_u - T0)
-        ) / (u_dx * u_dx);
-        T = in_solid ? (T0 + diffusion * (u_dt / heat_capacity))
-                     : (T0 + diffusion * u_dt);
+    // Shared CFL-clamped 4-neighbor diffusion for both modes. Previously the
+    // non-physical branch lacked any per-direction clamp and could amplify at high k
+    // or dt; now both modes use the same stable update, differing only in whether
+    // individual coefficients or the sum gets rescaled when it exceeds the 0.24 /
+    // 0.96 stability windows.
+    float coeff_l = k_l * u_dt / (u_dx * u_dx * heat_capacity);
+    float coeff_r = k_r * u_dt / (u_dx * u_dx * heat_capacity);
+    float coeff_d = k_d * u_dt / (u_dx * u_dx * heat_capacity);
+    float coeff_u = k_u * u_dt / (u_dx * u_dx * heat_capacity);
+    coeff_l = clamp(coeff_l, 0.0, 0.24);
+    coeff_r = clamp(coeff_r, 0.0, 0.24);
+    coeff_d = clamp(coeff_d, 0.0, 0.24);
+    coeff_u = clamp(coeff_u, 0.0, 0.24);
+    float coeff_sum = coeff_l + coeff_r + coeff_d + coeff_u;
+    if (coeff_sum > 0.96) {
+        float scale = 0.96 / coeff_sum;
+        coeff_l *= scale;
+        coeff_r *= scale;
+        coeff_d *= scale;
+        coeff_u *= scale;
     }
+    T = T0
+      + coeff_l * (T_l - T0)
+      + coeff_r * (T_r - T0)
+      + coeff_d * (T_d - T0)
+      + coeff_u * (T_u - T0);
 
+    // Cooling toward ambient. Uses exponential relaxation (unconditionally stable
+    // for any dt) instead of the old `T -= dT * rate * dt` that could overshoot
+    // ambient at large dt or high cooling_rate and oscillate around it.
     if (in_solid) {
+        float loss = u_solid_heat_loss * max(prop_c.w, 0.05);
+        float a = 1.0 - exp(-loss * u_dt / heat_capacity);
         float dT = max(T - u_ambient_temp, 0.0);
-        T -= dT * (u_solid_heat_loss * max(prop_c.w, 0.05)) * (u_dt / heat_capacity);
+        T -= dT * a;
     } else {
         float dT = T - u_ambient_temp;
         float plume = clamp(smoke_in[idx] * 0.70 + vapor_in[idx] * 0.12, 0.0, 1.0);
         float hot = smoothstep(35.0, 260.0, max(dT, 0.0));
         float fresh_source = smoothstep(0.02, 0.16, vapor_source_in[idx]);
         float hold_gate = mix(0.0, plume, fresh_source);
-        float cooling_scale = 1.0 - 0.85 * u_combustion_hold * hold_gate * hot;
-        T -= dT * u_cooling_rate * clamp(cooling_scale, 0.15, 1.0) * u_dt;
+        float cooling_scale = clamp(1.0 - 0.85 * u_combustion_hold * hold_gate * hot, 0.15, 1.0);
+        float a = 1.0 - exp(-u_cooling_rate * cooling_scale * u_dt);
+        T -= dT * a;
     }
 
     temp_out[idx] = clamp(T, max(u_ambient_temp - 100.0, 0.0), 2000.0);
