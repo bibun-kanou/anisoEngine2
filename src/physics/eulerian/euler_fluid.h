@@ -30,7 +30,8 @@ public:
         f32   vapor_decay = 0.75f;      // Condensation / mixing rate
         f32   latent_cooling = 0.30f;   // More vapor means less direct air heating
         f32   combustion_heat_boost = 2.2f; // Extra hot-gas injection from active burning materials
-        f32   combustion_hold = 0.82f;   // Hot smoky cells cool more slowly so flames can stay volumetric
+        f32   combustion_hold = 0.55f;   // Hot smoky cells cool a bit more slowly so flames can stay volumetric.
+                                          // 0.82 was too high and let blast plumes insulate themselves for 3-5s.
         f32   solid_thermal_diffusivity = 0.004f; // Internal SDF heat spread rate
         f32   solid_heat_capacity = 4.0f;   // Higher = more heat sink / slower temp change
         f32   solid_contact_transfer = 0.012f; // How strongly SDF solids give heat to touching air/objects

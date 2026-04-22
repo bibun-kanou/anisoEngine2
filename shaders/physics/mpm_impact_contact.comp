@@ -42,6 +42,35 @@ bool responds_to_impact_heat(uint mat_type) {
             mat_type == 65u || mat_type == 66u);
 }
 
+// Per-material friction / impact-heating scale. Mirrors the pattern in
+// thermal_coupling_defaults(). Lets metals, ceramics, fibers, and brittle stuff feel
+// different under friction; fluids and soft gels stay quieter. 1.0 is the reference.
+float impact_heat_scale(uint mat_type) {
+    // Metals conduct and spark: high
+    if (mat_type == 24u) return 2.20;   // THERMO_METAL
+    if (mat_type == 62u) return 1.90;   // QUENCH_STEEL / thermoelastic metals
+    if (mat_type == 63u) return 1.90;   // SPRING_STEEL_STRIP
+    // Hard ceramics, stoneware, bisque: moderate
+    if (mat_type == 10u || mat_type == 11u ||
+        mat_type == 38u || mat_type == 45u || mat_type == 47u ||
+        mat_type == 48u) return 1.50;
+    // Glass, filament glass: sharp but brittle, heats readily under impact
+    if (mat_type == 17u || mat_type == 18u) return 1.45;
+    // Fiber / wood / bone: anisotropic, moderate friction heating
+    if (mat_type == 5u || mat_type == 12u || mat_type == 13u ||
+        mat_type == 14u || mat_type == 15u || mat_type == 16u) return 1.25;
+    // Lamp-oil / burning / embers already carry heat — nudge not slam
+    if (mat_type == 7u || mat_type == 8u || mat_type == 19u) return 0.80;
+    // Ferro / magnetic rubber / oobleck / topo-goo / impact-gel: soft, damp
+    if (mat_type == 31u || mat_type == 58u || mat_type == 59u ||
+        mat_type == 60u || mat_type == 61u) return 0.55;
+    // Bread / pastry / crumb family: soft, negligible heating
+    if (mat_type == 28u || mat_type == 29u || mat_type == 30u ||
+        mat_type == 42u || mat_type == 46u) return 0.35;
+    // Default reference
+    return 1.0;
+}
+
 vec2 sample_grid_velocity(vec2 pos) {
     float inv_dx = 1.0 / u_dx;
     vec2 cell_pos = (pos - u_grid_origin) * inv_dx;
@@ -101,16 +130,31 @@ void main() {
     float new_speed = length(new_vel);
     float impact_delta = length(new_vel - old_vel);
     float speed_loss = max(old_speed - new_speed, 0.0);
-    float strike_gate = smoothstep(1.5, 8.5, impact_delta);
-    float crush_gate = smoothstep(0.35, 4.0, speed_loss);
-    float travel_gate = smoothstep(3.0, 16.0, max(old_speed, new_speed));
+
+    // Thresholds lowered so realistic slow slides and light bumps also register.
+    // Previous values (1.5 / 0.35 / 3.0) silently zeroed out sub-m/s collisions,
+    // which made collision heating "almost never work" in normal scenes.
+    float strike_gate = smoothstep(0.40, 4.0, impact_delta);
+    float crush_gate = smoothstep(0.10, 2.0, speed_loss);
+    float travel_gate = smoothstep(0.75, 8.0, max(old_speed, new_speed));
     float hotspot = clamp((strike_gate * 0.68 + crush_gate * 0.92) * travel_gate, 0.0, 1.0);
-    if (mat_type == 24u) hotspot *= 1.20;
-    if (mat_type == 38u || mat_type == 10u || mat_type == 35u || mat_type == 42u) hotspot *= 1.08;
+
+    // Per-material friction / impact-heat scale replaces the handful of hardcoded
+    // multipliers. Exposes a tunable knob per material, covers everything uniformly.
+    hotspot *= impact_heat_scale(mat_type);
+    hotspot = clamp(hotspot, 0.0, 1.0);
     if (hotspot <= 0.01) return;
 
     vec2 deposit_pos = pos + new_vel * (u_dt * 0.30);
-    float emit_temp = u_ambient_temp + hotspot * (260.0 + 980.0 * hotspot);
+    // Energy-informed ceiling: kinetic energy per unit mass lost in the collision is
+    // roughly 0.5*(v_old^2 - v_new^2) + |Δv|*tangential. Map that to a deposit temp
+    // through an effective specific-heat constant absorbed into the coefficients.
+    // This still atomicMaxes to the grid; a fully mass-aware deposit (energy/Σm) is
+    // Tier C territory.
+    float ke_loss = 0.5 * (old_speed * old_speed - new_speed * new_speed)
+                  + impact_delta * 0.35 * max(old_speed, new_speed);
+    ke_loss = max(ke_loss, 0.0);
+    float emit_temp = u_ambient_temp + hotspot * (180.0 + 620.0 * hotspot + 0.85 * ke_loss);
     float reach_cells = mix(1.10, 1.80, hotspot);
     scatter_contact_temp(deposit_pos, emit_temp, reach_cells);
 }

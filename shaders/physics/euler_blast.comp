@@ -52,7 +52,19 @@ void main() {
 
     vel_u[idx] += dir.x * u_strength * blast * u_dt;
     vel_v[idx] += dir.y * u_strength * blast * u_dt;
-    air_temp[idx] += u_heat * (0.40 * core + shell_weight) * u_dt;
+
+    // Saturating temperature write. The blast is retriggered every frame during the
+    // 0.22-0.56s wave window, so an additive `+=` stacks up to ~30 hits per cell and
+    // leaves a long-lived super-hot blob. Use max() so cells reach the per-call peak
+    // but can't keep climbing. u_heat is treated as an absolute target (Kelvin) here;
+    // the caller scales it by wave_phase, so the natural ramp-down still applies.
+    float heat_weight = 0.40 * core + shell_weight;
+    float target_T = u_heat * heat_weight;
+    air_temp[idx] = max(air_temp[idx], target_T);
+
+    // Smoke / vapor additions remain rate-limited (`+= ... * u_dt`) because they
+    // naturally decay via advection + smoke_decay; the cap at 4.0 / 8.0 prevents
+    // unbounded accumulation even during the full wave window.
     smoke[idx] = min(smoke[idx] + u_smoke * (0.18 * core + shell_weight) * u_dt, 4.0);
     vapor[idx] = min(vapor[idx] + u_divergence * (0.10 * core + shell_weight) * u_dt, 4.0);
     vapor_source[idx] = min(vapor_source[idx] + u_divergence * (0.30 * core + shell_weight), 8.0);
