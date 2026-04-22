@@ -190,6 +190,12 @@ struct PressureVesselRecord {
     bool auto_arm = true;
     bool ruptured = false;
     ng::f32 rupture_age = -1.0f;
+    // Impact-triggered rupture: when true, a sudden drop in avg shell speed
+    // (collision) forces a rupture even if pressure is below threshold. Used by
+    // ROCKET_PAYLOAD so the rocket propels through the air inertly and only
+    // detonates when it hits something.
+    bool impact_rupture = false;
+    ng::f32 prev_shell_speed = 0.0f;
 };
 
 enum class HoverKind { NONE, BATCH, SDF };
@@ -1838,6 +1844,30 @@ static void update_pressure_vessels(ng::f32 dt) {
 
         ng::f32 rupture_threshold = (3.4f + shell_integrity * 2.8f - shell_hot * 0.8f) * vessel.rupture_scale;
         bool just_ruptured = false;
+
+        // Impact detection: avg shell speed dropping sharply in one frame means the
+        // rocket has smashed into something. This is how ROCKET_PAYLOAD (and any
+        // future impact-triggered vessel) detonates on contact instead of cooking
+        // off in mid-air. Require that the vessel was actually moving (>4 m/s avg)
+        // so brand-new spawns and slow drifts don't false-trigger.
+        ng::f32 curr_shell_speed = 0.0f;
+        if (!shell_vel.empty()) {
+            for (const ng::vec2& v : shell_vel) curr_shell_speed += glm::length(v);
+            curr_shell_speed /= static_cast<ng::f32>(shell_vel.size());
+        }
+        if (vessel.impact_rupture && !vessel.ruptured &&
+            vessel.prev_shell_speed > 4.0f &&
+            curr_shell_speed < 0.45f * vessel.prev_shell_speed) {
+            vessel.ruptured = true;
+            vessel.rupture_age = 0.0f;
+            just_ruptured = true;
+            // Give the impact rupture a healthy burst energy so the payload
+            // actually gets flung. Use vessel.pressure at impact as a mild
+            // enhancer (moving rocket + some pressure = bigger boom).
+            vessel.burst_energy += (3.6f + vessel.pressure * 0.8f) * glm::max(vessel.burst_scale, 0.50f);
+        }
+        vessel.prev_shell_speed = curr_shell_speed;
+
         if (!vessel.ruptured && vessel.pressure > rupture_threshold) {
             vessel.ruptured = true;
             vessel.rupture_age = 0.0f;
@@ -2859,6 +2889,10 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.payload_push_scale = 5.50f;
                 vessel.payload_cone = 0.65f;
                 vessel.payload_directionality = 1.0f;
+                // Impact-triggered rupture. With rupture_scale at 4.5, normal gas
+                // pressure can't detonate it in flight — it only pops when the avg
+                // shell speed drops sharply, i.e. it hits something.
+                vessel.impact_rupture = true;
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 140000.0f;
                 payload_density = 6.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
