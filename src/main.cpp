@@ -933,8 +933,11 @@ static ProjectilePreset active_projectile_preset_id() {
     if (g_mode == InteractMode::LAUNCHER2) {
         // Fixed three-weapon palette for the key-6 launcher. Any new LAUNCHER2
         // weapon just needs an entry here plus a name in the UI combo below.
+        // TIME_BOMB maps to REAL_TIME_BOMB, not the older TIME_BOMB kind — the
+        // latter's delay was unreliable. REAL_TIME_BOMB is the pressure-vessel
+        // variant with an airtight SEALED_CHARGE shell and a proper fuse track.
         static constexpr ProjectilePreset kLauncher2[3] = {
-            ProjectilePreset::TIME_BOMB,
+            ProjectilePreset::REAL_TIME_BOMB,
             ProjectilePreset::ROCKET,
             ProjectilePreset::CLAYMORE
         };
@@ -2360,25 +2363,38 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.ignition_delay = 99.0f;
                 fuse_material = ng::MPMMaterial::STONEWARE;
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET) {
+                // Rocket tuning: biased strongly toward "propel, don't rupture".
+                // The previous values let gas build faster than the nozzle could
+                // vent, so pressure reached rupture_threshold within a fraction of
+                // a second and the rocket exploded instead of flying. Now:
+                //  - gas_source_scale is halved so gas generation matches nozzle
+                //    leak at steady state rather than outrunning it
+                //  - rupture_scale ~doubled so the pressure required to rupture
+                //    is far above the steady-state working pressure
+                //  - leak_scale + nozzle_open raised so gas exits faster
+                //  - thrust_scale raised so the reduced working pressure still
+                //    produces strong forward thrust
+                //  - burst_scale reduced so if the rocket ever does rupture late
+                //    in flight, the burst is a polite pop, not a fireball
                 shell_stiffness = 118000.0f;
                 shell_density *= 0.96f;
                 fuse_stiffness = 17000.0f;
                 fuse_density *= 0.82f;
                 core_stiffness = 21400.0f;
                 core_density *= 1.12f;
-                fuse_initial_temp = 620.0f;
-                core_initial_temp = 350.0f;
-                core_thermal = ng::vec4(3.45f, 1.98f, 0.54f, 0.00f);
-                vessel.gas_mass = 0.14f;
+                fuse_initial_temp = 560.0f;
+                core_initial_temp = 340.0f;
+                core_thermal = ng::vec4(2.20f, 1.70f, 0.58f, 0.00f);
+                vessel.gas_mass = 0.08f;
                 vessel.axis_bias = 1.0f;
-                vessel.gas_source_scale = 1.08f;
-                vessel.rupture_scale = 1.85f;
-                vessel.burst_scale = 0.35f;
+                vessel.gas_source_scale = 0.55f;
+                vessel.rupture_scale = 3.40f;
+                vessel.burst_scale = 0.22f;
                 vessel.shell_push_scale = 0.62f;
                 vessel.core_push_scale = 0.82f;
-                vessel.leak_scale = 1.48f;
-                vessel.nozzle_open = 0.34f;
-                vessel.thrust_scale = 3.40f;
+                vessel.leak_scale = 2.20f;
+                vessel.nozzle_open = 0.48f;
+                vessel.thrust_scale = 4.20f;
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::HEAT) {
                 shell_stiffness = 152000.0f;
                 shell_density *= 1.12f;

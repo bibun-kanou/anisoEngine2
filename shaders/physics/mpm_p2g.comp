@@ -3615,22 +3615,29 @@ void main() {
         crumble -= live * 0.08 * regrow_rate * u_dt;
         crumble = clamp(crumble, 0.0, 1.0);
 
-        // Without explicit advancement the regrow/ash scalars only ever hold whatever
-        // value they were initialized with, so healing is invisible and ash never really
-        // builds. Cool cells heal toward 1, hot cells burn into ash.
-        float heal_drive = clamp((360.0 - temp) / 110.0, 0.0, 1.0);
-        float burn_drive = clamp((temp - 420.0) / 210.0, 0.0, 1.0);
-        regrow += heal_drive * 0.48 * regrow_rate * (1.0 - regrow) * u_dt;
-        regrow -= burn_drive * 0.60 * regrow * u_dt;
+        // Advance regrow / ash. Two hard lessons from the previous tuning:
+        // 1. The burn threshold was too low (420K), so any heat that diffused to a
+        //    neighbor — even after the heat source was off — kept killing live tissue.
+        //    Ash propagated outward instead of healing inward. Raise the threshold to
+        //    540K and narrow the kill band so only directly-cooked cells turn to ash.
+        // 2. Heal was slower than burn, so even in the neutral band healing lost
+        //    ground to stale burn. Speed healing up and slow burning down.
+        // 3. Give the "neutral" band 360-540K width so diffused residual heat just
+        //    sits there without killing or healing — this is crucial for the recovery
+        //    phase right after the heat source is released.
+        float heal_drive = clamp((360.0 - temp) / 100.0, 0.0, 1.0);
+        float burn_drive = clamp((temp - 540.0) / 260.0, 0.0, 1.0);
+        regrow += heal_drive * 0.75 * regrow_rate * (1.0 - regrow) * u_dt;
+        regrow -= burn_drive * 0.28 * regrow * u_dt;
         // Only real fracture events should knock regrow back, not background sag.
-        // Gate on a smoothstep of crumble_drive so small quasistatic stress doesn't
-        // keep dragging regrow down forever.
         float fracture_event = smoothstep(0.15, 0.55, crumble_drive);
         regrow -= fracture_event * 0.35 * u_dt;
         regrow = clamp(regrow, 0.0, 1.0);
 
-        ash += burn_drive * 0.72 * (1.0 - ash) * u_dt;
-        ash -= recovery * 0.22 * regrow_rate * ash * u_dt;
+        ash += burn_drive * 0.42 * (1.0 - ash) * u_dt;
+        // Recovery pulls ash back down. Faster than before so the "black spreading"
+        // failure mode resolves cleanly once the cells cool back into the heal band.
+        ash -= recovery * 0.55 * regrow_rate * ash * u_dt;
         ash = clamp(ash, 0.0, 1.0);
 
         damage[idx] = regrow;
