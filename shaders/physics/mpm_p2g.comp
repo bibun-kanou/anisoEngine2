@@ -3597,11 +3597,15 @@ void main() {
         float tensile = max(max(svd.sigma.x, svd.sigma.y) - 1.0, 0.0);
         float shear = abs(svd.sigma.x - svd.sigma.y);
         float impact_drive = clamp(length(vec4(C[0], C[1])) * 0.030, 0.0, 1.6);
-        float crumble_drive = max(tensile * (0.20 + 1.10 * rigid_ash) +
-                                  shear * (0.16 + 0.94 * rigid_ash) +
-                                  impact_drive * (0.12 + 0.86 * rigid_ash) -
-                                  (0.86 - 0.48 * rigid_ash + 0.10 * live), 0.0);
-        crumble += crumble_drive * (0.10 + 0.82 * rigid_ash) * u_dt;
+        // Ash amplifies fracture sensitivity: higher coefficients on stress contributions,
+        // lower yield threshold at full ash, faster crumble accumulation. Combined with
+        // the softened E_ar in the stiffness line above this gives fully-ashed material
+        // a genuinely brittle read instead of the old "stiff char" feel.
+        float crumble_drive = max(tensile * (0.20 + 1.70 * rigid_ash) +
+                                  shear * (0.16 + 1.40 * rigid_ash) +
+                                  impact_drive * (0.12 + 1.20 * rigid_ash) -
+                                  (0.86 - 0.68 * rigid_ash + 0.10 * live), 0.0);
+        crumble += crumble_drive * (0.10 + 1.10 * rigid_ash) * u_dt;
         crumble -= live * 0.08 * regrow_rate * u_dt;
         crumble = clamp(crumble, 0.0, 1.0);
 

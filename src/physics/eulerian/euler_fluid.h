@@ -44,9 +44,11 @@ public:
         f32   bio_diffuse_a = 0.16f;
         f32   bio_diffuse_b = 0.08f;
         f32   bio_seed_strength = 0.55f;    // How strongly particles seed the activator / inhibitor field
-        f32   bio_pattern_speed = 1.0f;     // Global rate multiplier for the reaction-diffusion solve
+        f32   bio_pattern_speed = 1.5f;     // Global rate multiplier for the reaction-diffusion solve
         f32   bio_coupling = 0.85f;         // How strongly MPM bio-ish materials read and respond to the field
-        f32   bio_regrowth_rate = 1.0f;     // Global multiplier for living-material regrowth / recovery from the bio field
+        f32   bio_regrowth_rate = 3.0f;     // Global multiplier for living-material regrowth / recovery from the bio field.
+                                             // Raised from 1.0: the MPM regrow advance is slow at the old default and
+                                             // color restoration was invisible on demo timescales.
         bool  automata_enabled = false;     // Separate continuous automata substrate for colony / self-organization
         f32   automata_birth_lo = 0.278f;
         f32   automata_birth_hi = 0.365f;

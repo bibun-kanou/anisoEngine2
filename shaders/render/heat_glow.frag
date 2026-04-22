@@ -8,10 +8,12 @@ void main() {
     float r = length(coord);
     if (r > 1.0) discard;
 
-    // Soft radial falloff: warm center fading to transparent edge
+    // Soft radial falloff: warm center fading to transparent edge.
+    // Bumped from 0.25 to 0.38 so collision-heat puffs read clearly without being
+    // blown out; still keeps ember/hot-plate glow from over-saturating.
     float alpha = (1.0 - r);
     alpha = alpha * alpha; // Quadratic
-    alpha *= 0.25; // Keep it subtle/semi-transparent
+    alpha *= 0.38;
 
     frag_color = vec4(u_glow_color * alpha, alpha);
 }
