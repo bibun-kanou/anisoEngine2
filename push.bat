@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set REPO_URL=https://github.com/bibun-kanou/anisoEngine.git
+set REPO_URL=https://github.com/bibun-kanou/anisoEngine2.git
 set BRANCH=master
 
 echo === RadianceLab Push Script ===
