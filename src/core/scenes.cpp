@@ -4784,6 +4784,278 @@ static void load_hybrid_oobleck_armor(ParticleBuffer& particles, SPHSolver& /*sp
     mpm.params().poisson_ratio = old_nu;
 }
 
+// ================================================================
+// Fix-verification test scenes. Each one isolates one of the Tier S/A/B/C
+// physics fixes so you can eyeball before/after behavior without a full
+// regression run.
+// ================================================================
+
+// Tests S1 (regrow advancement), S2 (ash softens instead of stiffens), B3 (ash
+// fracture sensitivity). A hot column should char to ash, crumble visibly under
+// its own weight and a drop ball, then regrow from its cooler top after the
+// heat source is released. The witness column on the cool shelf provides a
+// side-by-side reference.
+static void load_fix_test_bio_heal(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                   MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                   CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls(sdf);
+    sdf.add_box(vec2(-1.10f, -1.12f), vec2(0.90f, 0.06f),
+                SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                "Hot Brass Bed", "Primary heat-soak plate beneath the test column. Expected: the column should ash from the bottom up.");
+    sdf.add_box(vec2(1.55f, 0.30f), vec2(0.48f, 0.06f),
+                SDFField::MaterialPresetID::SILVER_CONDUCTIVE,
+                "Cool Witness Shelf", "Raised shelf that should stay much cooler so the witness column keeps its green/alive color.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    mpm.params().heat_source_pos = vec2(-0.20f, -1.05f);
+    mpm.params().heat_source_radius = 0.60f;
+    mpm.params().heat_source_temp = 960.0f;
+
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+    const f32 old_nu = mpm.params().poisson_ratio;
+    const f32 old_fiber = mpm.params().fiber_strength;
+
+    mpm.params().youngs_modulus = 10800.0f;
+    mpm.params().poisson_ratio = 0.34f;
+    mpm.params().fiber_strength = 2.4f;
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-0.36f, -0.92f), vec2(-0.04f, 0.30f), sp,
+                    MPMMaterial::ASH_REGROWTH, 316.0f, vec2(0, 1), 1.0f);
+    register_scene_mpm_batch(creation, "Ash Column (Hot)",
+                             "S1+S2+B3: bottom should char into weak crumbly ash, middle should soften, top should regrow once the heat gun is released. Ash should now feel genuinely brittle instead of oddly stiff.",
+                             particles, before, MPMMaterial::ASH_REGROWTH,
+                             10800.0f, 0.34f, 316.0f, vec2(0, 1), 1.0f);
+
+    before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(1.38f, 0.40f), vec2(1.72f, 1.12f), sp,
+                    MPMMaterial::ASH_REGROWTH, 308.0f, vec2(0, 1), 1.0f);
+    register_scene_mpm_batch(creation, "Ash Witness (Cool)",
+                             "Reference column that should stay mostly alive and green. Use it to judge how much color restoration you see on the hot column after recovery.",
+                             particles, before, MPMMaterial::ASH_REGROWTH,
+                             10800.0f, 0.34f, 308.0f, vec2(0, 1), 1.0f);
+
+    mpm.params().youngs_modulus = old_E;
+    mpm.params().poisson_ratio = old_nu;
+    mpm.params().fiber_strength = old_fiber;
+}
+
+// Tests A1 (saturating blast temp write) + A2 (combustion_hold 0.82->0.55). A
+// small sealed charge in open air should detonate when heated; the resulting
+// plume should cool back within ~1-2s rather than lingering for 3-5s. A ring
+// of passive ceramic witnesses lets you eyeball whether heat sticks around
+// them unnaturally.
+static void load_fix_test_blast_cooldown(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                         MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                         CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls(sdf);
+    sdf.add_box(vec2(0.0f, -1.20f), vec2(0.30f, 0.06f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Charge Plinth", "Low plinth so the blast front spreads cleanly to both sides for cooldown observation.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    mpm.params().heat_source_pos = vec2(0.0f, -1.12f);
+    mpm.params().heat_source_radius = 0.20f;
+    mpm.params().heat_source_temp = 820.0f;
+
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+
+    mpm.params().youngs_modulus = 14000.0f;
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_circle(particles, vec2(0.0f, -1.04f), 0.16f, sp,
+                     MPMMaterial::SEALED_CHARGE, 300.0f, vec2(1, 0), 1.0f);
+    register_scene_mpm_batch(creation, "Sealed Charge",
+                             "A1+A2: should rupture and push a pressure wave, then the residual plume should cool back within ~1-2s. If it glows for 4+ seconds the cap/cooling fix didn't take.",
+                             particles, before, MPMMaterial::SEALED_CHARGE,
+                             14000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
+
+    mpm.params().youngs_modulus = 38000.0f;
+    const vec2 ring_positions[6] = {
+        vec2(-1.60f, -0.60f), vec2(-1.10f, 0.10f), vec2(-0.40f, 0.80f),
+        vec2(0.60f, 0.80f),   vec2(1.30f, 0.10f),  vec2(1.80f, -0.60f)
+    };
+    for (int i = 0; i < 6; ++i) {
+        before = particles.range(SolverType::MPM).count;
+        mpm.spawn_circle(particles, ring_positions[i], 0.08f, sp,
+                         MPMMaterial::CERAMIC, 300.0f, vec2(1, 0), 2.4f);
+        register_scene_mpm_batch(creation, "Ceramic Witness",
+                                 "Passive ceramic pebble at fixed radius. Use the set together to read whether the plume leaves a persistent hot-shell or cools away cleanly.",
+                                 particles, before, MPMMaterial::CERAMIC,
+                                 38000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 2.4f);
+    }
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+// Tests A3 (per-material friction scale) + A4 (lower thresholds + KE-informed
+// emit temp). A row of material strips with a heavy elastic ball sliding over
+// them — all at modest speeds that the old thresholds would have silently
+// zeroed. Metal and ceramic should now visibly heat, while wax and dough stay
+// cool. Use G to drop heat if a strip doesn't flex enough to register.
+static void load_fix_test_collision_heat(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                         MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                         CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls(sdf);
+    sdf.add_segment(vec2(-2.35f, -0.60f), vec2(2.35f, -1.00f), 0.08f,
+                    SDFField::MaterialPresetID::BRONZE_BALANCED,
+                    "Slide Ramp", "Tilted ramp so a dropped ball keeps tangential speed across the sample strips below.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    mpm.params().heat_source_pos = vec2(-3.0f, -2.0f);
+    mpm.params().heat_source_radius = 0.10f;
+    mpm.params().heat_source_temp = 300.0f;
+
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+
+    struct Strip {
+        const char* label;
+        const char* summary;
+        MPMMaterial material;
+        f32 E;
+        f32 density;
+        f32 x_center;
+        vec4 color;
+    };
+    const Strip strips[5] = {
+        {"Metal Strip",    "A3/A4: impact_heat_scale=2.2, should glow under even slow slides.", MPMMaterial::THERMO_METAL, 44000.0f, 6.8f, -1.70f, vec4(0.66f, 0.70f, 0.78f, 1.0f)},
+        {"Ceramic Strip",  "A3/A4: impact_heat_scale=1.5, should warm visibly in the first couple of passes.", MPMMaterial::CERAMIC,     32000.0f, 2.6f, -0.85f, vec4(0.86f, 0.84f, 0.80f, 1.0f)},
+        {"Stoneware Strip","A3/A4: stoneware family scale=1.5, middle reference between metal and ceramic.",   MPMMaterial::STONEWARE,   36000.0f, 3.0f,  0.00f, vec4(0.78f, 0.66f, 0.52f, 1.0f)},
+        {"Memory Wax",     "A3/A4: memory wax has no per-material boost and should stay cool unless deeply compressed.", MPMMaterial::MEMORY_WAX, 9000.0f, 1.4f,  0.85f, vec4(0.94f, 0.80f, 0.60f, 1.0f)},
+        {"Bread Strip",    "A3/A4: bread family explicitly dialed down (0.35x). Basically no heating expected from sliding.", MPMMaterial::BREAD, 12000.0f, 1.3f,  1.70f, vec4(0.90f, 0.78f, 0.52f, 1.0f)}
+    };
+
+    for (const Strip& s : strips) {
+        mpm.params().youngs_modulus = s.E;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, vec2(s.x_center - 0.30f, -1.20f),
+                        vec2(s.x_center + 0.30f, -1.02f), sp,
+                        s.material, 300.0f, vec2(1, 0), s.density);
+        register_scene_mpm_batch(creation, s.label, s.summary,
+                                 particles, before, s.material,
+                                 s.E, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), s.density);
+    }
+
+    // Heavy elastic drop ball, staged above the ramp's left edge so it slides
+    // across all five strips.
+    mpm.params().youngs_modulus = 80000.0f;
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_circle(particles, vec2(-2.10f, 0.60f), 0.18f, sp,
+                     MPMMaterial::ELASTIC, 300.0f, vec2(1, 0), 9.0f);
+    register_scene_mpm_batch(creation, "Slide Impactor",
+                             "Heavy elastic ball. Falls onto the ramp and slides across all five strips so you can compare per-material heating in one run.",
+                             particles, before, MPMMaterial::ELASTIC,
+                             80000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 9.0f);
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+// Tests C1 (demagnetizing-field feedback). A wide shallow ferrofluid puddle
+// over a horizontal bar magnet. The spike pattern should self-regulate in
+// spacing. A deep central pool provides a taller-spike comparison.
+static void load_fix_test_ferro_demag(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                      MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                      CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.15f, -1.30f), vec2(2.15f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRONZE_BALANCED,
+                    "Bench Plate", "Flat bronze plate under the ferro puddles.");
+    sdf.add_box(vec2(0.0f, -1.50f), vec2(1.80f, 0.10f),
+                SDFField::MaterialPresetID::MAGNET_X,
+                "Bar Magnet", "Permanent horizontal magnet buried just below the bench. Expected: both ferro puddles above should form clearly separated spike combs.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = false;
+    mpm.params().magnet_radius = 0.70f;
+    mpm.params().magnet_spike_strength = 1.35f;
+
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+
+    mpm.params().youngs_modulus = 5200.0f;
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-1.80f, -1.20f), vec2(-0.10f, -0.92f), sp,
+                    MPMMaterial::FERRO_FLUID, 300.0f);
+    register_scene_mpm_batch(creation, "Wide Shallow Puddle",
+                             "C1: demag feedback should keep spikes from packing onto a single point. Expect a regular comb of ~4-6 low peaks across this strip.",
+                             particles, before, MPMMaterial::FERRO_FLUID,
+                             5200.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0));
+
+    before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(0.30f, -1.20f), vec2(1.00f, -0.60f), sp,
+                    MPMMaterial::FERRO_FLUID, 300.0f);
+    register_scene_mpm_batch(creation, "Deep Central Pool",
+                             "Tall pool for comparing peak height. Spikes should be taller but still finitely spaced. If spikes collapse into a single tower, the demag feedback isn't firing.",
+                             particles, before, MPMMaterial::FERRO_FLUID,
+                             5200.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0));
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+// Tests C6 (symmetric SPH thermal weighting). A single cup with a hot layer
+// above a cold layer of the same fluid — they should now actually equilibrate
+// toward a single warm temperature. Before the fix, the heavier low-rho
+// particles heated faster and the pool never reached a single temperature.
+static void load_fix_test_sph_equil(ParticleBuffer& particles, SPHSolver& sph,
+                                    MPMSolver& mpm, UniformGrid& /*grid*/, SDFField& sdf,
+                                    CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-0.80f, -1.30f), vec2(-0.80f, 0.10f), 0.06f,
+                    SDFField::MaterialPresetID::ROSE_GOLD_LIGHT,
+                    "Cup Left", "Left wall of the mixing cup.");
+    sdf.add_segment(vec2(0.80f, -1.30f), vec2(0.80f, 0.10f), 0.06f,
+                    SDFField::MaterialPresetID::ROSE_GOLD_LIGHT,
+                    "Cup Right", "Right wall of the mixing cup.");
+    sdf.rebuild();
+
+    SPHParams sph_p = sph.params();
+    sph_p.enable_thermal = true;
+    sph_p.surface_tension = 0.80f;
+    sph_p.codim_enabled = false;
+    sph.set_params(sph_p);
+
+    mpm.params().enable_thermal = false;
+
+    const f32 sp = sph.params().smoothing_radius * 0.5f;
+
+    // Cold base layer (below).
+    u32 before = particles.range(SolverType::SPH).count;
+    sph.spawn_block(particles, vec2(-0.70f, -1.22f), vec2(0.70f, -0.60f), sp);
+    u32 off = particles.range(SolverType::SPH).offset + before;
+    u32 cnt = particles.range(SolverType::SPH).count - before;
+    apply_sph_batch_properties(particles, sph, off, cnt,
+                               MPMMaterial::SPH_WATER, 282.0f, 8.0f, 0.10f,
+                               vec4(0.20f, 0.46f, 0.96f, 1.0f));
+    register_scene_sph_batch(creation, "Cold Water Base",
+                             "C6: starts at 282K. Should warm toward the middle temperature (~320K) as the hot layer above it mixes in, not stay stuck cold.",
+                             particles, before, vec4(0.20f, 0.46f, 0.96f, 1.0f),
+                             0.42f, "Fill the lower half of the cup.",
+                             MPMMaterial::SPH_WATER, 282.0f);
+
+    // Hot upper layer.
+    before = particles.range(SolverType::SPH).count;
+    sph.spawn_block(particles, vec2(-0.70f, -0.58f), vec2(0.70f, 0.02f), sp);
+    off = particles.range(SolverType::SPH).offset + before;
+    cnt = particles.range(SolverType::SPH).count - before;
+    apply_sph_batch_properties(particles, sph, off, cnt,
+                               MPMMaterial::SPH_WATER, 360.0f, 8.0f, 0.10f,
+                               vec4(0.98f, 0.40f, 0.22f, 1.0f));
+    register_scene_sph_batch(creation, "Hot Water Cap",
+                             "C6: starts at 360K. Should cool toward the middle temperature as it mixes with the cold base. If the cap stays visibly hot while the base stays visibly cold, the symmetric weighting fix didn't take.",
+                             particles, before, vec4(0.98f, 0.40f, 0.22f, 1.0f),
+                             0.42f, "Fill the upper half of the cup.",
+                             MPMMaterial::SPH_WATER, 360.0f);
+}
+
 // ---- dispatch ----
 void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
                 MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
@@ -5066,6 +5338,21 @@ void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
         break;
     case SceneID::THERMAL_VERIFY_IMPACT_RINGDOWN:
         load_thermal_verify_impact_ringdown(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::FIX_TEST_BIO_HEAL:
+        load_fix_test_bio_heal(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::FIX_TEST_BLAST_COOLDOWN:
+        load_fix_test_blast_cooldown(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::FIX_TEST_COLLISION_HEAT:
+        load_fix_test_collision_heat(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::FIX_TEST_FERRO_DEMAG:
+        load_fix_test_ferro_demag(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::FIX_TEST_SPH_EQUIL:
+        load_fix_test_sph_equil(particles, sph, mpm, grid, sdf, creation);
         break;
     }
 }

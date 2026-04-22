@@ -38,9 +38,12 @@ enum class SceneID : u32 {
     HYBRID_PRESSURE_POTTERY=82, HYBRID_FERRO_SPLASH=83, HYBRID_OOBLECK_ARMOR=84,
     THERMAL_VERIFY_SDF_JUNCTION=85, THERMAL_VERIFY_HOT_BLOCKS=86,
     THERMAL_VERIFY_CROSS_IGNITION=87, THERMAL_VERIFY_BRIDGE_WITNESS=88,
-    THERMAL_VERIFY_IMPACT_RINGDOWN=89
+    THERMAL_VERIFY_IMPACT_RINGDOWN=89,
+    FIX_TEST_BIO_HEAL=90, FIX_TEST_BLAST_COOLDOWN=91,
+    FIX_TEST_COLLISION_HEAT=92, FIX_TEST_FERRO_DEMAG=93,
+    FIX_TEST_SPH_EQUIL=94
 };
-constexpr int SCENE_COUNT = 90;
+constexpr int SCENE_COUNT = 95;
 inline const char* scene_names[] = {
     "Default", "Thermal Furnace", "Fracture Test", "Melting",
     "Dam Break", "Stiff Objects", "Heat Ramp", "Fire & Forge",
@@ -76,7 +79,12 @@ inline const char* scene_names[] = {
     "Thermal Verify: Hot Blocks [new]",
     "Thermal Verify: Cross Ignition [new]",
     "Thermal Verify: Bridge Witness [new]",
-    "Thermal Verify: Impact Ringdown [new]"
+    "Thermal Verify: Impact Ringdown [new]",
+    "Fix Test: Bio Heal + Ash Brittle [new]",
+    "Fix Test: Blast Cooldown [new]",
+    "Fix Test: Collision Heat Rack [new]",
+    "Fix Test: Ferro Demag Spikes [new]",
+    "Fix Test: SPH Thermal Equilibrium [new]"
 };
 
 void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
