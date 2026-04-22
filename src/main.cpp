@@ -2824,30 +2824,40 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.ignition_delay = 0.18f;
                 vessel.ignition_window = 0.18f;
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD) {
-                // Rocket body (copied from the baseline ROCKET tuning that propels
-                // cleanly) plus a forward-biased claymore payload that fires when the
-                // shell finally ruptures at the end of the flight.
-                shell_stiffness = 118000.0f;
-                shell_density *= 0.96f;
+                // "Impact-only" rocket: propels on its own fuse/nozzle, but the
+                // rupture threshold is so high that internal gas pressure alone
+                // can't detonate it in flight. Rupture only happens when the shell
+                // collides with something, because mpm_impact_contact slams shell
+                // temperature up to ~1000K on a hard hit, which then diffuses to
+                // the core, spikes gas_source, and pushes pressure past threshold.
+                // Tuning priorities:
+                //  - low gas_source + aggressive leak = steady-state pressure stays
+                //    well under rupture_threshold during cruise
+                //  - cold core (285K) so no internal slow-cook path
+                //  - strong thrust_scale compensates for the low working pressure
+                //  - payload_push very high since the eventual rupture is the
+                //    moment the shrapnel gets its only forward kick
+                shell_stiffness = 124000.0f;
+                shell_density *= 0.98f;
                 fuse_stiffness = 17000.0f;
                 fuse_density *= 0.82f;
                 core_stiffness = 21400.0f;
-                core_density *= 1.12f;
-                fuse_initial_temp = 560.0f;
-                core_initial_temp = 340.0f;
-                core_thermal = ng::vec4(2.20f, 1.70f, 0.58f, 0.00f);
-                vessel.gas_mass = 0.10f;
+                core_density *= 1.10f;
+                fuse_initial_temp = 490.0f;
+                core_initial_temp = 285.0f;
+                core_thermal = ng::vec4(0.70f, 1.30f, 0.68f, 0.00f);
+                vessel.gas_mass = 0.06f;
                 vessel.axis_bias = 1.0f;
-                vessel.gas_source_scale = 0.65f;
-                vessel.rupture_scale = 2.60f;
-                vessel.burst_scale = 0.42f;
+                vessel.gas_source_scale = 0.35f;
+                vessel.rupture_scale = 4.50f;
+                vessel.burst_scale = 0.48f;
                 vessel.shell_push_scale = 0.62f;
                 vessel.core_push_scale = 0.82f;
-                vessel.leak_scale = 2.00f;
-                vessel.nozzle_open = 0.42f;
-                vessel.thrust_scale = 3.80f;
-                vessel.payload_push_scale = 3.80f;
-                vessel.payload_cone = 0.72f;
+                vessel.leak_scale = 2.40f;
+                vessel.nozzle_open = 0.50f;
+                vessel.thrust_scale = 5.20f;
+                vessel.payload_push_scale = 5.50f;
+                vessel.payload_cone = 0.65f;
                 vessel.payload_directionality = 1.0f;
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 140000.0f;
@@ -5650,6 +5660,7 @@ static void render_tool_indicator(ng::vec2 mouse_world, ng::f32 time, InteractMo
         active_mode != InteractMode::SWEEP_DRAG &&
         active_mode != InteractMode::SPRING_DRAG &&
         active_mode != InteractMode::DROP_BALL &&
+        active_mode != InteractMode::LAUNCHER2 &&
         active_mode != InteractMode::FOOT_CONTROL) return;
 
     auto draw_drag_debug = [&](ng::SolverType solver_type,
