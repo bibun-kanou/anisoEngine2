@@ -3582,9 +3582,12 @@ void main() {
         R = svd.U * transpose(svd.V);
         J = svd.sigma.x * svd.sigma.y;
 
-        // Ash should soften the matrix, not reinforce it. The previous 2.85x multiplier
-        // made fully-ashed tissue stiffer than living tissue — the opposite of "brittle".
-        float E_ar = E * mix(1.10, 0.35, rigid_ash) * mix(1.0, 1.35, live) * scaffold;
+        // Ash is brittle but still hard — it should hold shape until actually struck.
+        // The original 2.85x over-reinforced ash; the 0.35x over-swung and let ash
+        // slump under its own weight. 0.85x keeps ash almost as stiff as living
+        // tissue so it stays up, while brittleness comes from the fracture-drive
+        // coefficients below (they amplify impact stress heavily at full ash).
+        float E_ar = E * mix(1.10, 0.85, rigid_ash) * mix(1.0, 1.35, live) * scaffold;
         float nu_ar = clamp(mix(0.12, 0.24, live), 0.06, 0.28);
         float mu_ar = E_ar / (2.0 * (1.0 + nu_ar));
         float lam_ar = E_ar * nu_ar / ((1.0 + nu_ar) * (1.0 - 2.0 * nu_ar));
@@ -3597,15 +3600,18 @@ void main() {
         float tensile = max(max(svd.sigma.x, svd.sigma.y) - 1.0, 0.0);
         float shear = abs(svd.sigma.x - svd.sigma.y);
         float impact_drive = clamp(length(vec4(C[0], C[1])) * 0.030, 0.0, 1.6);
-        // Ash amplifies fracture sensitivity: higher coefficients on stress contributions,
-        // lower yield threshold at full ash, faster crumble accumulation. Combined with
-        // the softened E_ar in the stiffness line above this gives fully-ashed material
-        // a genuinely brittle read instead of the old "stiff char" feel.
-        float crumble_drive = max(tensile * (0.20 + 1.70 * rigid_ash) +
-                                  shear * (0.16 + 1.40 * rigid_ash) +
-                                  impact_drive * (0.12 + 1.20 * rigid_ash) -
-                                  (0.86 - 0.68 * rigid_ash + 0.10 * live), 0.0);
-        crumble += crumble_drive * (0.10 + 1.10 * rigid_ash) * u_dt;
+        // Brittle-but-hard fracture: impact stress dominates at full ash (×1.40),
+        // while quasistatic tensile/shear contributions are modest so ash doesn't
+        // self-crumble under its own weight. Threshold stays generous so it takes
+        // a real strike to cross into fracture.
+        float crumble_drive = max(tensile * (0.20 + 1.00 * rigid_ash) +
+                                  shear * (0.16 + 0.80 * rigid_ash) +
+                                  impact_drive * (0.12 + 1.40 * rigid_ash) -
+                                  (0.86 - 0.38 * rigid_ash + 0.10 * live), 0.0);
+        // Accumulation rate tamed so ash doesn't ratchet toward collapse from tiny
+        // background stresses. When a real impact hits, crumble_drive spikes and
+        // this term still builds crumble fast.
+        crumble += crumble_drive * (0.10 + 0.60 * rigid_ash) * u_dt;
         crumble -= live * 0.08 * regrow_rate * u_dt;
         crumble = clamp(crumble, 0.0, 1.0);
 
@@ -3614,9 +3620,13 @@ void main() {
         // builds. Cool cells heal toward 1, hot cells burn into ash.
         float heal_drive = clamp((360.0 - temp) / 110.0, 0.0, 1.0);
         float burn_drive = clamp((temp - 420.0) / 210.0, 0.0, 1.0);
-        regrow += heal_drive * 0.42 * regrow_rate * (1.0 - regrow) * u_dt;
+        regrow += heal_drive * 0.48 * regrow_rate * (1.0 - regrow) * u_dt;
         regrow -= burn_drive * 0.60 * regrow * u_dt;
-        regrow -= crumble_drive * 0.22 * u_dt;
+        // Only real fracture events should knock regrow back, not background sag.
+        // Gate on a smoothstep of crumble_drive so small quasistatic stress doesn't
+        // keep dragging regrow down forever.
+        float fracture_event = smoothstep(0.15, 0.55, crumble_drive);
+        regrow -= fracture_event * 0.35 * u_dt;
         regrow = clamp(regrow, 0.0, 1.0);
 
         ash += burn_drive * 0.72 * (1.0 - ash) * u_dt;

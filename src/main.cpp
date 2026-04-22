@@ -70,7 +70,7 @@ static const char* magnetic_debug_view_names[] = {
     "M Arrows", "|M|", "Source Charge"
 };
 
-enum class InteractMode { PUSH, PULL, DRAG, SWEEP_DRAG, DROP_BALL, DRAW_WALL, ERASE_WALL, SPRING_DRAG, FOOT_CONTROL, MAGNET };
+enum class InteractMode { PUSH, PULL, DRAG, SWEEP_DRAG, DROP_BALL, DRAW_WALL, ERASE_WALL, SPRING_DRAG, FOOT_CONTROL, MAGNET, LAUNCHER2 };
 static InteractMode g_mode = InteractMode::PUSH;
 
 enum class ProjectilePreset : int {
@@ -353,6 +353,12 @@ static ng::f32 g_ball_cone_deg = 0.0f;
 static ng::f32 g_ball_launch_gain = 8.0f;
 static ng::f32 g_ball_min_launch_speed = 0.25f;
 static int g_ball_preset = static_cast<int>(ProjectilePreset::STEEL);
+// Launcher2: a focused weapon menu on key 6. Three choices only — time bomb,
+// self-propelling rocket, directional claymore. Maps into the same
+// ProjectilePreset enum so all the existing fire_projectile machinery (layers,
+// fuses, payloads, drag-aim) applies automatically.
+enum class Launcher2Preset : int { TIME_BOMB = 0, ROCKET = 1, CLAYMORE = 2 };
+static int g_launcher2_preset = static_cast<int>(Launcher2Preset::TIME_BOMB);
 static int g_ball_shape = 0;
 static bool g_projectile_auto_arm = true;
 static ProjectileDragMode g_ball_drag_mode = ProjectileDragMode::NONE;
@@ -924,6 +930,16 @@ struct ProjectilePresetDesc {
 };
 
 static ProjectilePreset active_projectile_preset_id() {
+    if (g_mode == InteractMode::LAUNCHER2) {
+        // Fixed three-weapon palette for the key-6 launcher. Any new LAUNCHER2
+        // weapon just needs an entry here plus a name in the UI combo below.
+        static constexpr ProjectilePreset kLauncher2[3] = {
+            ProjectilePreset::TIME_BOMB,
+            ProjectilePreset::ROCKET,
+            ProjectilePreset::CLAYMORE
+        };
+        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 2)];
+    }
     return static_cast<ProjectilePreset>(
         glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::EVEN_DEEPER_FUSE_BOMB)));
 }
@@ -4057,9 +4073,10 @@ static const char* persistent_mode_label(InteractMode mode) {
     case InteractMode::DRAG: return "3 Telekinesis";
     case InteractMode::SWEEP_DRAG: return "4 Sweep Drag";
     case InteractMode::DROP_BALL: return "5 Projectile Launcher";
-    case InteractMode::DRAW_WALL: return "6 Draw Wall";
-    case InteractMode::ERASE_WALL: return "7 Erase Wall";
-    case InteractMode::FOOT_CONTROL: return "8 Foot Control";
+    case InteractMode::LAUNCHER2: return "6 Weapon Launcher";
+    case InteractMode::DRAW_WALL: return "7 Draw Wall";
+    case InteractMode::ERASE_WALL: return "8 Erase Wall";
+    case InteractMode::FOOT_CONTROL: return "9 Foot Control";
     case InteractMode::PULL: return "Pull";
     case InteractMode::MAGNET: return "Magnet";
     default: return "Mode";
@@ -4510,9 +4527,10 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
             "3 Telekinesis",
             "4 Sweep Drag",
             "5 Projectile Launcher",
-            "6 Draw Wall",
-            "7 Erase Wall",
-            "8 Foot Control"
+            "6 Weapon Launcher",
+            "7 Draw Wall",
+            "8 Erase Wall",
+            "9 Foot Control"
         };
         static const InteractMode tool_modes[] = {
             InteractMode::PUSH,
@@ -4520,15 +4538,17 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
             InteractMode::DRAG,
             InteractMode::SWEEP_DRAG,
             InteractMode::DROP_BALL,
+            InteractMode::LAUNCHER2,
             InteractMode::DRAW_WALL,
             InteractMode::ERASE_WALL,
             InteractMode::FOOT_CONTROL
         };
+        const int kToolCount = 9;
         int tool = 0;
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < kToolCount; ++i) {
             if (g_mode == tool_modes[i]) { tool = i; break; }
         }
-        if (ImGui::Combo("Tool Mode", &tool, tnames, 8))
+        if (ImGui::Combo("Tool Mode", &tool, tnames, kToolCount))
             g_mode = tool_modes[tool];
 
         auto draw_main_radius_slider = [&]() {
@@ -4600,11 +4620,39 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
             ImGui::TextDisabled("Mode 5: RMB drag aims, Alt+RMB adjusts cone width, and LMB fires from the cursor.");
             break;
         }
+        case InteractMode::LAUNCHER2: {
+            static const char* launcher2_names[] = {
+                "Time Bomb",
+                "Rocket",
+                "Claymore"
+            };
+            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 3);
+            ProjectilePresetDesc ui_preset = current_projectile_preset();
+            if (ui_preset.kind != ProjectilePresetDesc::Kind::SINGLE) {
+                ImGui::Checkbox("Auto-Arm on Launch", &g_projectile_auto_arm);
+                ImGui::TextDisabled(g_projectile_auto_arm
+                                        ? "On: the fuse path starts itself after launch."
+                                        : "Off: weapons spawn inert; place them, then heat them to arm.");
+            }
+            ImGui::Combo("Projectile Shape", &g_ball_shape, projectile_shape_names, 4);
+            ImGui::SliderFloat("Ball Radius", &g_ball_radius, 0.05f, 0.45f, "%.2f");
+            ImGui::SliderFloat("Ball Weight", &g_ball_weight, 0.5f, 16.0f, "%.1f");
+            ImGui::SliderFloat("Min Launch Speed", &g_ball_min_launch_speed, 0.02f, 8.0f, "%.2f");
+            ImGui::SliderFloat("Launch Gain", &g_ball_launch_gain, 2.0f, 18.0f, "%.1f");
+            ImGui::SliderFloat("Cone Angle", &g_ball_cone_deg, 0.0f, 65.0f, "%.1f deg");
+
+            ng::f32 current_speed = glm::clamp(glm::length(current_projectile_vector()) * glm::max(g_ball_launch_gain, 0.1f),
+                                               g_ball_min_launch_speed, 42.0f);
+            ImGui::Text("Current Launch Speed: %.2f", current_speed);
+            ImGui::TextDisabled("%s", ui_preset.summary);
+            ImGui::TextDisabled("Mode 6: RMB drag aims, Alt+RMB adjusts cone width, and LMB fires.");
+            break;
+        }
         case InteractMode::DRAW_WALL:
-            ImGui::TextDisabled("Mode 6 draws temporary SDF walls directly into the scene.");
+            ImGui::TextDisabled("Mode 7 draws temporary SDF walls directly into the scene.");
             break;
         case InteractMode::ERASE_WALL:
-            ImGui::TextDisabled("Mode 7 erases temporary SDF walls under the cursor.");
+            ImGui::TextDisabled("Mode 8 erases temporary SDF walls under the cursor.");
             break;
         case InteractMode::FOOT_CONTROL: {
             static const char* focus_names[] = {
@@ -4667,6 +4715,9 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
             ImGui::BulletText("LMB sweeps in the cursor motion direction with a soft falloff.");
         } else if (g_mode == InteractMode::DROP_BALL) {
             ImGui::BulletText("RMB drags the shot vector, Alt+RMB widens the cone, and LMB fires.");
+        } else if (g_mode == InteractMode::LAUNCHER2) {
+            ImGui::BulletText("Three-weapon launcher: time bomb, rocket, claymore.");
+            ImGui::BulletText("RMB drags the shot vector, Alt+RMB widens the cone, LMB fires.");
         } else if (g_mode == InteractMode::FOOT_CONTROL) {
             ImGui::BulletText("LMB drags the focused anatomy target.");
             ImGui::BulletText("Hold RMB to pin the ankle while you curl or place the forefoot and toes.");
@@ -6088,9 +6139,10 @@ int main(int, char**) {
                 if (engine.input().key_pressed(SDL_SCANCODE_3)) g_mode = InteractMode::DRAG;
                 if (engine.input().key_pressed(SDL_SCANCODE_4)) g_mode = InteractMode::SWEEP_DRAG;
                 if (engine.input().key_pressed(SDL_SCANCODE_5)) g_mode = InteractMode::DROP_BALL;
-                if (engine.input().key_pressed(SDL_SCANCODE_6)) g_mode = InteractMode::DRAW_WALL;
-                if (engine.input().key_pressed(SDL_SCANCODE_7)) g_mode = InteractMode::ERASE_WALL;
-                if (engine.input().key_pressed(SDL_SCANCODE_8)) g_mode = InteractMode::FOOT_CONTROL;
+                if (engine.input().key_pressed(SDL_SCANCODE_6)) g_mode = InteractMode::LAUNCHER2;
+                if (engine.input().key_pressed(SDL_SCANCODE_7)) g_mode = InteractMode::DRAW_WALL;
+                if (engine.input().key_pressed(SDL_SCANCODE_8)) g_mode = InteractMode::ERASE_WALL;
+                if (engine.input().key_pressed(SDL_SCANCODE_9)) g_mode = InteractMode::FOOT_CONTROL;
             }
 
             if (engine.input().key_pressed(SDL_SCANCODE_V)) {
@@ -6125,7 +6177,7 @@ int main(int, char**) {
             bool interaction_resize_mode = (g_mode == InteractMode::PUSH ||
                                             g_mode == InteractMode::DRAG ||
                                             g_mode == InteractMode::SPRING_DRAG);
-            bool launcher_resize_mode = (g_mode == InteractMode::DROP_BALL);
+            bool launcher_resize_mode = (g_mode == InteractMode::DROP_BALL || g_mode == InteractMode::LAUNCHER2);
             bool foot_control_mode = (g_mode == InteractMode::FOOT_CONTROL && ng::foot_demo_active());
             bool magnet_resize_mode = allow_temp_hotkeys && engine.input().key_down(SDL_SCANCODE_M);
             bool ctrl_down = engine.input().key_down(SDL_SCANCODE_LCTRL) || engine.input().key_down(SDL_SCANCODE_RCTRL);
@@ -6165,7 +6217,9 @@ int main(int, char**) {
         const bool foot_mode_active = (!g_creation.active && !g_selection_mode && !imgui_mouse &&
                                        active_mode == InteractMode::FOOT_CONTROL && ng::foot_demo_active());
         const bool launcher_mode_active = (!g_creation.active && !g_selection_mode && !imgui_mouse &&
-                                           !magnet_hotkey && active_mode == InteractMode::DROP_BALL);
+                                           !magnet_hotkey &&
+                                           (active_mode == InteractMode::DROP_BALL ||
+                                            active_mode == InteractMode::LAUNCHER2));
         const bool ctrl_down = engine.input().key_down(SDL_SCANCODE_LCTRL) || engine.input().key_down(SDL_SCANCODE_RCTRL);
         const bool alt_down = engine.input().key_down(SDL_SCANCODE_LALT) || engine.input().key_down(SDL_SCANCODE_RALT);
         ng::vec2 mouse_delta_screen = engine.input().mouse_delta();
@@ -6271,7 +6325,8 @@ int main(int, char**) {
                 g_ball_drag_mode = ProjectileDragMode::NONE;
             }
 
-            if (active_mode == InteractMode::DROP_BALL && engine.input().mouse_pressed(SDL_BUTTON_LEFT)) {
+            if ((active_mode == InteractMode::DROP_BALL || active_mode == InteractMode::LAUNCHER2) &&
+                engine.input().mouse_pressed(SDL_BUTTON_LEFT)) {
                 fire_projectile(mouse_world);
             } else if (engine.input().mouse_down(SDL_BUTTON_LEFT) || engine.input().mouse_down(SDL_BUTTON_RIGHT)) {
                 switch (active_mode) {

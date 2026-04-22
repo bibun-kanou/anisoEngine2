@@ -24,6 +24,7 @@ uniform float u_heat;
 uniform float u_smoke;
 uniform float u_divergence;
 uniform float u_dt;
+uniform float u_ambient_temp;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -53,14 +54,14 @@ void main() {
     vel_u[idx] += dir.x * u_strength * blast * u_dt;
     vel_v[idx] += dir.y * u_strength * blast * u_dt;
 
-    // Saturating temperature write. The blast is retriggered every frame during the
-    // 0.22-0.56s wave window, so an additive `+=` stacks up to ~30 hits per cell and
-    // leaves a long-lived super-hot blob. Use max() so cells reach the per-call peak
-    // but can't keep climbing. u_heat is treated as an absolute target (Kelvin) here;
-    // the caller scales it by wave_phase, so the natural ramp-down still applies.
+    // Additive-with-absolute-ceiling. Switching the old `+=` to a hard max() killed
+    // rocket propulsion because cells plateaued at target_T on frame 1 and never
+    // provided a sustained pressure gradient for thrust. The additive form restores
+    // sustained heating, and the ambient+1200K cap prevents the old multi-second
+    // lingering-hot-blob failure mode.
     float heat_weight = 0.40 * core + shell_weight;
-    float target_T = u_heat * heat_weight;
-    air_temp[idx] = max(air_temp[idx], target_T);
+    float max_T = u_ambient_temp + 1200.0;
+    air_temp[idx] = min(air_temp[idx] + u_heat * heat_weight * u_dt, max_T);
 
     // Smoke / vapor additions remain rate-limited (`+= ... * u_dt`) because they
     // naturally decay via advection + smoke_decay; the cap at 4.0 / 8.0 prevents

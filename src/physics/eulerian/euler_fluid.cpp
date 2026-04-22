@@ -811,6 +811,7 @@ void EulerianFluid::blast_at(vec2 world_pos, f32 inner_radius, f32 outer_radius,
     blast_shader_.set_float("u_smoke", smoke);
     blast_shader_.set_float("u_divergence", divergence);
     blast_shader_.set_float("u_dt", dt);
+    blast_shader_.set_float("u_ambient_temp", config_.ambient_temp);
     blast_shader_.dispatch_1d(n);
     ComputeShader::barrier_ssbo();
 }
