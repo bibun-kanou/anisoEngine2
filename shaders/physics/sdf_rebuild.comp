@@ -1,0 +1,81 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform image2D u_sdf;
+layout(rgba32f, binding = 1) uniform image2D u_sdf_props;
+layout(r32ui, binding = 2) uniform uimage2D u_sdf_object_ids;
+layout(r32ui, binding = 3) uniform uimage2D u_sdf_palette;
+
+struct Primitive {
+    uint type;
+    uint palette_code;
+    float conductivity_scale;
+    float heat_capacity_scale;
+    float contact_transfer_scale;
+    float heat_loss_scale;
+    float params[7];
+};
+
+layout(std430, binding = 17) readonly buffer PrimBuffer {
+    Primitive primitives[];
+};
+
+uniform ivec2 u_resolution;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+uniform uint u_prim_count;
+
+#include "common/sdf_ops.glsl"
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+
+    // Map pixel to world position
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(u_resolution);
+    vec2 world_pos = mix(u_world_min, u_world_max, uv);
+
+    float d = 1e10; // Start with empty space
+    vec4 props = vec4(1.0);
+    uint object_id = 0u;
+    uint palette_code = 0u;
+
+    for (uint i = 0u; i < u_prim_count; i++) {
+        Primitive prim = primitives[i];
+        float prim_d;
+
+        if (prim.type == 0u) { // BOX
+            vec2 center = vec2(prim.params[0], prim.params[1]);
+            vec2 half_ext = vec2(prim.params[2], prim.params[3]);
+            prim_d = sdf_box(world_pos, center, half_ext);
+        }
+        else if (prim.type == 1u) { // CIRCLE
+            vec2 center = vec2(prim.params[0], prim.params[1]);
+            float radius = prim.params[2];
+            prim_d = sdf_circle(world_pos, center, radius);
+        }
+        else if (prim.type == 2u) { // SEGMENT
+            vec2 a = vec2(prim.params[0], prim.params[1]);
+            vec2 b = vec2(prim.params[2], prim.params[3]);
+            float thickness = prim.params[4];
+            prim_d = sdf_segment(world_pos, a, b, thickness);
+        }
+        else {
+            prim_d = 1e10;
+        }
+
+        if (prim_d < d) {
+            d = prim_d;
+            props = vec4(prim.conductivity_scale, prim.heat_capacity_scale,
+                         prim.contact_transfer_scale, prim.heat_loss_scale);
+            object_id = i + 1u;
+            palette_code = prim.palette_code;
+        }
+    }
+
+    imageStore(u_sdf, pixel, vec4(d, 0.0, 0.0, 0.0));
+    imageStore(u_sdf_props, pixel, props);
+    imageStore(u_sdf_object_ids, pixel, uvec4(object_id, 0u, 0u, 0u));
+    imageStore(u_sdf_palette, pixel, uvec4(palette_code, 0u, 0u, 0u));
+}

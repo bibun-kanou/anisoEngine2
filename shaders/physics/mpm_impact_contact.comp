@@ -1,0 +1,116 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 1) readonly buffer VelocityBuffer { vec2 velocities[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+
+layout(std430, binding = 43) readonly buffer GridVelX { float grid_vel_x[]; };
+layout(std430, binding = 44) readonly buffer GridVelY { float grid_vel_y[]; };
+layout(std430, binding = 56) coherent buffer GridContactTemp { int grid_contact_temp[]; };
+
+uniform uint u_offset;
+uniform uint u_count;
+uniform float u_dx;
+uniform float u_dt;
+uniform vec2 u_grid_origin;
+uniform ivec2 u_grid_res;
+uniform float u_ambient_temp;
+
+const float CONTACT_TEMP_SCALE = 1000.0;
+
+#include "common/mpm_utils.glsl"
+
+bool responds_to_impact_heat(uint mat_type) {
+    return (mat_type == 3u || mat_type == 4u || mat_type == 5u ||
+            mat_type == 7u || mat_type == 8u || mat_type == 9u ||
+            mat_type == 10u || mat_type == 11u || mat_type == 12u ||
+            mat_type == 13u || mat_type == 14u || mat_type == 15u ||
+            mat_type == 16u || mat_type == 17u || mat_type == 18u ||
+            mat_type == 19u || mat_type == 20u || mat_type == 21u ||
+            mat_type == 22u || mat_type == 23u || mat_type == 24u ||
+            mat_type == 25u || mat_type == 26u || mat_type == 27u ||
+            mat_type == 28u || mat_type == 29u || mat_type == 30u ||
+            mat_type == 31u || mat_type == 32u || mat_type == 33u ||
+            mat_type == 34u || mat_type == 35u || mat_type == 36u ||
+            mat_type == 37u || mat_type == 38u || mat_type == 40u ||
+            mat_type == 41u || mat_type == 42u || mat_type == 43u ||
+            mat_type == 44u || mat_type == 45u || mat_type == 46u ||
+            mat_type == 47u || mat_type == 48u || mat_type == 49u ||
+            mat_type == 62u || mat_type == 63u || mat_type == 64u ||
+            mat_type == 65u || mat_type == 66u);
+}
+
+vec2 sample_grid_velocity(vec2 pos) {
+    float inv_dx = 1.0 / u_dx;
+    vec2 cell_pos = (pos - u_grid_origin) * inv_dx;
+    ivec2 base = ivec2(floor(cell_pos - 0.5));
+    vec2 fx = cell_pos - vec2(base);
+    vec3 wx = bspline_weights(fx.x);
+    vec3 wy = bspline_weights(fx.y);
+
+    vec2 vel = vec2(0.0);
+    for (int gy = 0; gy < 3; ++gy) {
+        for (int gx = 0; gx < 3; ++gx) {
+            ivec2 node = base + ivec2(gx, gy);
+            if (node.x < 0 || node.y < 0 || node.x >= u_grid_res.x || node.y >= u_grid_res.y) continue;
+            uint ci = uint(node.y * u_grid_res.x + node.x);
+            float w = wx[gx] * wy[gy];
+            vel += w * vec2(grid_vel_x[ci], grid_vel_y[ci]);
+        }
+    }
+    return vel;
+}
+
+void scatter_contact_temp(vec2 pos, float emit_temp, float reach_cells) {
+    if (emit_temp <= u_ambient_temp + 1.0) return;
+
+    vec2 cell_f = (pos - u_grid_origin) / u_dx;
+    ivec2 base = ivec2(floor(cell_f));
+    int radius = int(ceil(max(reach_cells, 1.0)));
+
+    for (int oy = -radius; oy <= radius; ++oy) {
+        for (int ox = -radius; ox <= radius; ++ox) {
+            ivec2 cell = base + ivec2(ox, oy);
+            if (cell.x < 0 || cell.y < 0 || cell.x >= u_grid_res.x || cell.y >= u_grid_res.y) continue;
+            vec2 center = vec2(cell) + vec2(0.5);
+            float dist = length(center - cell_f);
+            float w = max(reach_cells - dist, 0.0);
+            if (w <= 0.0) continue;
+            float cell_temp = mix(u_ambient_temp, emit_temp, clamp(w / max(reach_cells, 1e-5), 0.0, 1.0));
+            uint ci = uint(cell.y * u_grid_res.x + cell.x);
+            atomicMax(grid_contact_temp[ci], int(cell_temp * CONTACT_TEMP_SCALE));
+        }
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    uint mat_type = material_ids[p];
+    if (!responds_to_impact_heat(mat_type)) return;
+
+    vec2 pos = positions[p];
+    vec2 old_vel = velocities[p];
+    vec2 new_vel = sample_grid_velocity(pos);
+
+    float old_speed = length(old_vel);
+    float new_speed = length(new_vel);
+    float impact_delta = length(new_vel - old_vel);
+    float speed_loss = max(old_speed - new_speed, 0.0);
+    float strike_gate = smoothstep(1.5, 8.5, impact_delta);
+    float crush_gate = smoothstep(0.35, 4.0, speed_loss);
+    float travel_gate = smoothstep(3.0, 16.0, max(old_speed, new_speed));
+    float hotspot = clamp((strike_gate * 0.68 + crush_gate * 0.92) * travel_gate, 0.0, 1.0);
+    if (mat_type == 24u) hotspot *= 1.20;
+    if (mat_type == 38u || mat_type == 10u || mat_type == 35u || mat_type == 42u) hotspot *= 1.08;
+    if (hotspot <= 0.01) return;
+
+    vec2 deposit_pos = pos + new_vel * (u_dt * 0.30);
+    float emit_temp = u_ambient_temp + hotspot * (260.0 + 980.0 * hotspot);
+    float reach_cells = mix(1.10, 1.80, hotspot);
+    scatter_contact_temp(deposit_pos, emit_temp, reach_cells);
+}

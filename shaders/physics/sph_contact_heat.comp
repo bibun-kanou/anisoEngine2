@@ -1,0 +1,63 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 6) readonly buffer TempBuffer { float temperatures[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+layout(std430, binding = 10) readonly buffer ThermalStateBuffer { float thermal_state[]; };
+layout(std430, binding = 54) readonly buffer ThermalCouplingBuf { vec4 thermal_coupling[]; };
+layout(std430, binding = 56) coherent buffer GridContactTemp { int grid_contact_temp[]; };
+
+uniform uint u_offset;
+uniform uint u_count;
+uniform vec2 u_grid_origin;
+uniform ivec2 u_grid_res;
+uniform float u_dx;
+uniform float u_ambient_temp;
+
+const float CONTACT_TEMP_SCALE = 1000.0;
+
+void scatter_cell(ivec2 cell, float value) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_grid_res.x || cell.y >= u_grid_res.y) return;
+    uint ci = uint(cell.y * u_grid_res.x + cell.x);
+    atomicMax(grid_contact_temp[ci], int(value * CONTACT_TEMP_SCALE));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    float temp = temperatures[p];
+    uint mat = material_ids[p];
+    float state = thermal_state[idx];
+    float batch_heat = max(thermal_coupling[idx].y, 0.0);
+
+    float hotness = smoothstep(u_ambient_temp + 25.0, u_ambient_temp + 260.0, temp);
+    if (mat == 53u) hotness = max(hotness, state);      // burning oil
+    else if (mat == 54u) hotness *= 0.55;               // boiling water
+    else if (mat == 56u) hotness *= 0.75;               // flash fluid
+
+    if (hotness <= 0.01) return;
+
+    vec2 cell_f = (positions[p] - u_grid_origin) / u_dx;
+    ivec2 base = ivec2(floor(cell_f));
+    float emit_temp = mix(u_ambient_temp, temp, clamp(hotness * mix(0.55, 1.0, batch_heat), 0.0, 1.0));
+    if (mat == 53u) {
+        emit_temp = max(emit_temp, mix(temp, temp + 80.0, clamp(state, 0.0, 1.0)));
+    }
+
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            ivec2 cell = base + ivec2(ox, oy);
+            vec2 center = vec2(cell) + vec2(0.5);
+            float dist = length(center - cell_f);
+            float reach = (mat == 53u) ? 1.32 : 1.15;
+            float w = max(reach - dist, 0.0);
+            if (w <= 0.0) continue;
+            float cell_temp = mix(u_ambient_temp, emit_temp, w);
+            scatter_cell(cell, cell_temp);
+        }
+    }
+}

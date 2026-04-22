@@ -1,0 +1,36 @@
+#version 450 core
+
+// Heat gun injection into Euler temperature field
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 66) buffer Temp { float temperature[]; };
+layout(std430, binding = 68) buffer Smoke { float smoke[]; };
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min;
+uniform vec2 u_gun_pos;
+uniform float u_gun_radius;
+uniform float u_gun_power;
+uniform float u_dt;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    vec2 world_pos = u_world_min + (vec2(cell) + 0.5) * u_dx;
+
+    float dist = length(world_pos - u_gun_pos);
+    if (dist >= u_gun_radius) return;
+
+    float falloff = 1.0 - dist / u_gun_radius;
+    falloff *= falloff;
+
+    temperature[idx] = clamp(temperature[idx] + u_gun_power * falloff * u_dt, 0.0, 1500.0);
+
+    if (u_gun_power > 0.0 && falloff > 0.2) {
+        smoke[idx] = min(smoke[idx] + falloff * 0.05 * u_dt, 1.0);
+    }
+}

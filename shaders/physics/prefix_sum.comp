@@ -1,0 +1,99 @@
+#version 450 core
+
+// Work-efficient exclusive prefix sum (Blelloch scan)
+// Processes BLOCK_SIZE elements per workgroup.
+// Three-pass approach:
+//   Pass 1 (mode=0): local scan per block, write block totals
+//   Pass 2 (mode=1): scan block totals (single workgroup)
+//   Pass 3 (mode=2): add block offsets back to each element
+
+#define BLOCK_SIZE 512
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer DataBuffer {
+    uint data[];
+};
+
+layout(std430, binding = 1) buffer BlockSumsBuffer {
+    uint block_sums[];
+};
+
+uniform uint u_n;
+uniform int u_mode; // 0=local scan, 1=scan block sums, 2=add offsets
+
+shared uint shared_data[BLOCK_SIZE];
+
+void local_scan() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Up-sweep (reduce)
+    uint offset = 1u;
+    for (uint d = BLOCK_SIZE >> 1u; d > 0u; d >>= 1u) {
+        barrier();
+        if (tid < d) {
+            uint ai = offset * (2u * tid + 1u) - 1u;
+            uint bi = offset * (2u * tid + 2u) - 1u;
+            shared_data[bi] += shared_data[ai];
+        }
+        offset <<= 1u;
+    }
+
+    // Store block total and set last to 0 for exclusive scan
+    if (tid == 0u) {
+        uint block_id = gl_WorkGroupID.x;
+        block_sums[block_id] = shared_data[BLOCK_SIZE - 1u];
+        shared_data[BLOCK_SIZE - 1u] = 0u;
+    }
+    barrier();
+
+    // Down-sweep
+    for (uint d = 1u; d < BLOCK_SIZE; d <<= 1u) {
+        offset >>= 1u;
+        barrier();
+        if (tid < d) {
+            uint ai = offset * (2u * tid + 1u) - 1u;
+            uint bi = offset * (2u * tid + 2u) - 1u;
+            uint temp = shared_data[ai];
+            shared_data[ai] = shared_data[bi];
+            shared_data[bi] += temp;
+        }
+    }
+    barrier();
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint block_id = gl_WorkGroupID.x;
+
+    if (u_mode == 0) {
+        // Pass 1: Local prefix sum per block
+        uint base = block_id * BLOCK_SIZE;
+        shared_data[tid]        = (base + tid < u_n)        ? data[base + tid] : 0u;
+        shared_data[tid + 256u] = (base + tid + 256u < u_n) ? data[base + tid + 256u] : 0u;
+        barrier();
+
+        local_scan();
+
+        if (base + tid < u_n)        data[base + tid] = shared_data[tid];
+        if (base + tid + 256u < u_n) data[base + tid + 256u] = shared_data[tid + 256u];
+    }
+    else if (u_mode == 1) {
+        // Pass 2: Scan block sums (single workgroup, u_n = num_blocks)
+        shared_data[tid]        = (tid < u_n)        ? data[tid] : 0u;
+        shared_data[tid + 256u] = (tid + 256u < u_n) ? data[tid + 256u] : 0u;
+        barrier();
+
+        local_scan();
+
+        if (tid < u_n)        data[tid] = shared_data[tid];
+        if (tid + 256u < u_n) data[tid + 256u] = shared_data[tid + 256u];
+    }
+    else if (u_mode == 2) {
+        // Pass 3: Add block offset to each element
+        uint base = block_id * BLOCK_SIZE;
+        uint block_offset = block_sums[block_id];
+        if (base + tid < u_n)        data[base + tid] += block_offset;
+        if (base + tid + 256u < u_n) data[base + tid + 256u] += block_offset;
+    }
+}

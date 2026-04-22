@@ -1,0 +1,80 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 2) readonly buffer MassBuffer { float masses[]; };
+layout(std430, binding = 3) writeonly buffer DensityBuffer { float densities[]; };
+layout(std430, binding = 12) readonly buffer SortedIndexBuffer { uint sorted_indices[]; };
+layout(std430, binding = 13) readonly buffer CellStartBuffer { uint cell_start[]; };
+layout(std430, binding = 14) readonly buffer CellEndBuffer { uint cell_end[]; };
+
+// Codimensional data: .xy=tangent, .z=dim_ratio, .w=kernel_scale
+layout(std430, binding = 16) readonly buffer CodimBuffer { vec4 codim_data[]; };
+
+uniform uint u_offset;
+uniform uint u_count;
+uniform float u_h;
+uniform uint u_table_size;
+uniform float u_cell_size;
+uniform vec2 u_world_min;
+uniform int u_use_codim; // 0=standard 2D, 1=adaptive codimensional
+
+#include "common/sph_kernels.glsl"
+
+// 1D kernel for thin features: uses perpendicular distance only
+float W_codim_1D(float r_perp, float h) {
+    // 1D cubic spline normalized for line features in 2D
+    float q = abs(r_perp) / h;
+    float sigma = 2.0 / (3.0 * h); // 1D normalization
+    if (q < 1.0) return sigma * (1.0 - 1.5 * q * q + 0.75 * q * q * q);
+    if (q < 2.0) { float t = 2.0 - q; return sigma * 0.25 * t * t * t; }
+    return 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint i = u_offset + idx;
+    vec2 pos_i = positions[i];
+
+    float rho = 0.0;
+    ivec2 cell_i = pos_to_cell_2d(pos_i, u_cell_size, u_world_min);
+
+    // Get this particle's codim info
+    vec4 ci = (u_use_codim == 1) ? codim_data[idx] : vec4(1, 0, 1, 1);
+    vec2 tangent = ci.xy;
+    float dim_ratio = ci.z;
+    float kernel_scale = ci.w;
+    bool is_thin = (u_use_codim == 1 && dim_ratio < 0.25);
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            uint hash = hash_cell_2d(cell_i + ivec2(dx, dy), u_table_size);
+            uint start = cell_start[hash];
+            uint end_idx = cell_end[hash];
+
+            for (uint s = start; s < end_idx; s++) {
+                uint j = sorted_indices[s];
+                vec2 diff = pos_i - positions[j];
+                float r = length(diff);
+
+                if (r < 2.0 * u_h) {
+                    float w;
+                    if (is_thin && r > 1e-6) {
+                        // Codimensional: project distance onto perpendicular to tangent
+                        vec2 perp = vec2(-tangent.y, tangent.x);
+                        float r_perp = abs(dot(diff, perp));
+                        w = W_codim_1D(r_perp, u_h) * kernel_scale;
+                    } else {
+                        w = W_cubic(r, u_h);
+                    }
+                    rho += masses[j] * w;
+                }
+            }
+        }
+    }
+
+    densities[i] = max(rho, 1.0);
+}

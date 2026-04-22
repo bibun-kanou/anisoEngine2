@@ -1,0 +1,44 @@
+#version 450 core
+
+// Scatter particles into sorted order using cell_start + atomic per-cell write offset
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer {
+    vec2 positions[];
+};
+
+layout(std430, binding = 11) readonly buffer CellIndexBuffer {
+    uint cell_indices[];
+};
+
+layout(std430, binding = 13) readonly buffer CellStartBuffer {
+    uint cell_start[];
+};
+
+layout(std430, binding = 15) coherent buffer WriteOffsetBuffer {
+    uint write_offsets[]; // Reused cell_count_buf, cleared before this pass
+};
+
+layout(std430, binding = 12) writeonly buffer SortedIndexBuffer {
+    uint sorted_indices[];
+};
+
+uniform uint u_particle_offset;
+uniform uint u_particle_count;
+uniform uint u_table_size;
+uniform float u_cell_size;
+uniform vec2 u_world_min;
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= u_particle_count) return;
+
+    uint global_idx = u_particle_offset + local_idx;
+    uint cell = cell_indices[global_idx];
+
+    uint local_offset = atomicAdd(write_offsets[cell], 1u);
+    uint sorted_pos = cell_start[cell] + local_offset;
+
+    sorted_indices[sorted_pos] = global_idx;
+}

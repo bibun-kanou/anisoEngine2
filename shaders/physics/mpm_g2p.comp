@@ -1,0 +1,2323 @@
+#version 450 core
+
+// MLS-MPM G2P: gather velocity, advect, thermal, visualization
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer PositionBuffer  { vec2  positions[];    };
+layout(std430, binding = 1) buffer VelocityBuffer  { vec2  velocities[];   };
+layout(std430, binding = 4) readonly buffer DeformGradBuf { vec4 deform_grads[]; };
+layout(std430, binding = 5) buffer AffineMomBuffer  { vec4  affine_moms[]; };
+layout(std430, binding = 6) buffer TempBuffer       { float temperatures[];};
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[];};
+layout(std430, binding = 9) buffer ColorBuffer { vec4  colors[];  };
+
+layout(std430, binding = 43) readonly buffer GridVelX  { float grid_vel_x[]; };
+layout(std430, binding = 44) readonly buffer GridVelY  { float grid_vel_y[]; };
+layout(std430, binding = 45) readonly buffer GridTemp  { float grid_temp[];  };
+layout(std430, binding = 56) readonly buffer GridContactTemp { int grid_contact_temp[]; };
+
+layout(std430, binding = 47) buffer JpBuffer    { float Jp_data[];    };
+layout(std430, binding = 49) buffer DamageBuf   { float damage[];     };
+layout(std430, binding = 50) buffer PhaseBuf    { float phase_data[]; };
+layout(std430, binding = 52) readonly buffer SpringAnchorBuf { vec2 spring_anchor[]; };
+layout(std430, binding = 53) readonly buffer SpringWeightBuf { float spring_weight[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+layout(binding = 1) uniform sampler2D u_magnetic_field_tex;
+layout(binding = 2) uniform sampler2D u_magnetic_total_tex;
+layout(binding = 3) uniform sampler2D u_magnetic_material_tex;
+layout(binding = 4) uniform sampler2D u_air_temp_tex;
+layout(binding = 5) uniform sampler2D u_airtight_pressure_tex;
+layout(binding = 6) uniform sampler2D u_airtight_outside_tex;
+layout(binding = 7) uniform sampler2D u_bio_a_tex;
+layout(binding = 8) uniform sampler2D u_bio_b_tex;
+layout(binding = 9) uniform sampler2D u_automata_tex;
+layout(binding = 10) uniform sampler2D u_bio_support_tex;
+layout(binding = 11) uniform sampler2D u_bio_source_tex;
+
+uniform uint  u_offset, u_count;
+uniform float u_dx, u_dt;
+uniform vec2  u_grid_origin;
+uniform ivec2 u_grid_res;
+uniform int   u_vis_mode;
+uniform vec2  u_sdf_world_min, u_sdf_world_max;
+uniform int   u_use_sdf;
+uniform vec2  u_heat_pos;
+uniform float u_heat_radius, u_heat_power;
+// Ambient heat source
+uniform vec2  u_heat_src_pos;
+uniform float u_heat_src_radius, u_heat_src_temp;
+uniform float u_ambient_temp; // From Eulerian air solver
+uniform float u_particle_cooling;
+uniform int   u_use_air_heat;
+uniform vec2  u_air_world_min;
+uniform vec2  u_air_world_max;
+uniform int   u_use_airtight_pressure;
+uniform ivec2 u_cavity_res;
+uniform int   u_use_bio_field;
+uniform float u_bio_coupling;
+uniform float u_bio_regrowth_rate;
+uniform int   u_use_automata_field;
+uniform float u_automata_coupling;
+uniform float u_bio_view_gain;
+uniform float u_automata_view_gain;
+uniform int   u_enable_pseudo_25d;
+uniform float u_pseudo_25d_depth;
+uniform vec2  u_mouse_world;
+uniform float u_mouse_force;
+uniform float u_mouse_damping;
+uniform int   u_mouse_mode;
+uniform vec2  u_spring_origin;
+uniform int   u_kinematic_targets_active;
+uniform float u_kinematic_target_force;
+uniform float u_kinematic_target_damping;
+uniform vec2  u_magnet_pos;
+uniform float u_magnet_radius;
+uniform float u_magnet_falloff_radius;
+uniform float u_magnet_force;
+uniform float u_magnet_spike_strength;
+uniform float u_magnet_spike_freq;
+uniform int   u_use_real_magnetics;
+uniform vec2  u_magnetic_world_min;
+uniform vec2  u_magnetic_world_max;
+uniform float u_magnetic_force_scale;
+uniform int   u_keep_colors;
+uniform uint  u_highlight_start; // Global index range to highlight
+uniform uint  u_highlight_end;
+uniform float u_time;
+uniform vec2  u_gravity;
+uniform int   u_multi_scale; // 0=uniform gravity, 1=per-material scale
+
+#include "common/mpm_utils.glsl"
+
+// --- Colormaps ---
+vec3 viridis(float t) {
+    t = clamp(t, 0.0, 1.0);
+    vec3 a = vec3(0.267,0.004,0.329), b = vec3(0.163,0.471,0.558);
+    vec3 c = vec3(0.477,0.821,0.318), d = vec3(0.993,0.906,0.144);
+    if (t < 0.33) return mix(a, b, t*3.0);
+    if (t < 0.66) return mix(b, c, (t-0.33)*3.0);
+    return mix(c, d, (t-0.66)*3.0);
+}
+vec3 heat_color(float t) {
+    t = clamp(t, 0.0, 1.0);
+    if (t < 0.33) return mix(vec3(0.1,0.1,0.5), vec3(0.9,0.9,0.1), t*3.0);
+    if (t < 0.66) return mix(vec3(0.9,0.9,0.1), vec3(0.9,0.4,0.1), (t-0.33)*3.0);
+    return mix(vec3(0.9,0.4,0.1), vec3(1.0,0.1,0.1), (t-0.66)*3.0);
+}
+vec3 coolwarm(float t) {
+    t = clamp(t, 0.0, 1.0);
+    if (t < 0.5) return mix(vec3(0.1,0.3,0.8), vec3(0.9), t*2.0);
+    return mix(vec3(0.9), vec3(0.8,0.1,0.1), (t-0.5)*2.0);
+}
+
+vec3 ash_regrowth_state_color(float regrow, float ash, float crumble, float temp_here) {
+    float cool_restore = 1.0 - smoothstep(360.0, 450.0, temp_here);
+    float recovery_vis = smoothstep(0.05, 0.42, regrow) * cool_restore * smoothstep(0.12, 0.90, ash);
+    float effective_live = clamp(max(regrow, recovery_vis * (0.28 + 0.72 * ash)), 0.0, 1.0);
+    float dead = clamp(ash * (1.0 - effective_live * 0.92), 0.0, 1.0);
+    float ember = smoothstep(520.0, 920.0, temp_here) * (0.18 + 0.82 * ash) * (1.0 - regrow * 0.35);
+    vec3 char_c = mix(vec3(0.58, 0.58, 0.56), vec3(0.04, 0.04, 0.04), smoothstep(0.10, 0.92, dead));
+    vec3 live_c = mix(vec3(0.76, 0.78, 0.74), vec3(0.97, 0.98, 0.95), smoothstep(0.08, 0.88, effective_live));
+    float revive = smoothstep(0.08, 0.58, effective_live) * mix(0.34, 1.0, cool_restore);
+    vec3 c = mix(char_c, live_c, revive);
+    c = mix(c, vec3(0.08, 0.07, 0.06), smoothstep(0.10, 0.95, crumble) * 0.45);
+    c += vec3(0.26, 0.10, 0.03) * ember;
+    return c;
+}
+
+vec4 sample_magnetic_field(vec2 pos) {
+    vec2 uv = (pos - u_magnetic_world_min) / (u_magnetic_world_max - u_magnetic_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0);
+    return texture(u_magnetic_field_tex, uv);
+}
+
+vec4 sample_magnetic_field_smooth(vec2 pos) {
+    ivec2 res = textureSize(u_magnetic_field_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    vec4 c = sample_magnetic_field(pos) * 0.34;
+    vec4 ax = (sample_magnetic_field(pos + vec2(cell.x, 0.0)) +
+               sample_magnetic_field(pos - vec2(cell.x, 0.0)) +
+               sample_magnetic_field(pos + vec2(0.0, cell.y)) +
+               sample_magnetic_field(pos - vec2(0.0, cell.y))) * 0.12;
+    vec4 dg = (sample_magnetic_field(pos + cell) +
+               sample_magnetic_field(pos + vec2(cell.x, -cell.y)) +
+               sample_magnetic_field(pos + vec2(-cell.x, cell.y)) +
+               sample_magnetic_field(pos - cell)) * 0.045;
+    return c + ax + dg;
+}
+
+vec4 sample_magnetic_total_field(vec2 pos) {
+    vec2 uv = (pos - u_magnetic_world_min) / (u_magnetic_world_max - u_magnetic_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0);
+    return texture(u_magnetic_total_tex, uv);
+}
+
+vec4 sample_magnetic_total_field_smooth(vec2 pos) {
+    ivec2 res = textureSize(u_magnetic_total_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    vec4 c = sample_magnetic_total_field(pos) * 0.34;
+    vec4 ax = (sample_magnetic_total_field(pos + vec2(cell.x, 0.0)) +
+               sample_magnetic_total_field(pos - vec2(cell.x, 0.0)) +
+               sample_magnetic_total_field(pos + vec2(0.0, cell.y)) +
+               sample_magnetic_total_field(pos - vec2(0.0, cell.y))) * 0.12;
+    vec4 dg = (sample_magnetic_total_field(pos + cell) +
+               sample_magnetic_total_field(pos + vec2(cell.x, -cell.y)) +
+               sample_magnetic_total_field(pos + vec2(-cell.x, cell.y)) +
+               sample_magnetic_total_field(pos - cell)) * 0.045;
+    return c + ax + dg;
+}
+
+vec4 sample_magnetic_field_bulk(vec2 pos) {
+    ivec2 res = textureSize(u_magnetic_field_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    vec4 sum = sample_magnetic_field(pos) * 0.14;
+    sum += (sample_magnetic_field(pos + vec2(cell.x, 0.0)) +
+            sample_magnetic_field(pos - vec2(cell.x, 0.0)) +
+            sample_magnetic_field(pos + vec2(0.0, cell.y)) +
+            sample_magnetic_field(pos - vec2(0.0, cell.y))) * 0.09;
+    sum += (sample_magnetic_field(pos + cell) +
+            sample_magnetic_field(pos + vec2(cell.x, -cell.y)) +
+            sample_magnetic_field(pos + vec2(-cell.x, cell.y)) +
+            sample_magnetic_field(pos - cell)) * 0.07;
+    sum += (sample_magnetic_field(pos + vec2(2.0 * cell.x, 0.0)) +
+            sample_magnetic_field(pos - vec2(2.0 * cell.x, 0.0)) +
+            sample_magnetic_field(pos + vec2(0.0, 2.0 * cell.y)) +
+            sample_magnetic_field(pos - vec2(0.0, 2.0 * cell.y))) * 0.05;
+    sum += (sample_magnetic_field(pos + vec2(2.0 * cell.x,  cell.y)) +
+            sample_magnetic_field(pos + vec2(2.0 * cell.x, -cell.y)) +
+            sample_magnetic_field(pos + vec2(-2.0 * cell.x,  cell.y)) +
+            sample_magnetic_field(pos + vec2(-2.0 * cell.x, -cell.y)) +
+            sample_magnetic_field(pos + vec2( cell.x, 2.0 * cell.y)) +
+            sample_magnetic_field(pos + vec2(-cell.x, 2.0 * cell.y)) +
+            sample_magnetic_field(pos + vec2( cell.x,-2.0 * cell.y)) +
+            sample_magnetic_field(pos + vec2(-cell.x,-2.0 * cell.y))) * 0.025;
+    return sum;
+}
+
+float sample_magnetic_occupancy(vec2 pos) {
+    vec2 uv = (pos - u_magnetic_world_min) / (u_magnetic_world_max - u_magnetic_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_magnetic_material_tex, uv).z;
+}
+
+float sample_magnetic_occupancy_smooth(vec2 pos) {
+    ivec2 res = textureSize(u_magnetic_material_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    float c = sample_magnetic_occupancy(pos) * 0.50;
+    float ax = (sample_magnetic_occupancy(pos + vec2(cell.x, 0.0)) +
+                sample_magnetic_occupancy(pos - vec2(cell.x, 0.0)) +
+                sample_magnetic_occupancy(pos + vec2(0.0, cell.y)) +
+                sample_magnetic_occupancy(pos - vec2(0.0, cell.y))) * 0.10;
+    float dg = (sample_magnetic_occupancy(pos + cell) +
+                sample_magnetic_occupancy(pos + vec2(cell.x, -cell.y)) +
+                sample_magnetic_occupancy(pos + vec2(-cell.x, cell.y)) +
+                sample_magnetic_occupancy(pos - cell)) * 0.025;
+    return c + ax + dg;
+}
+
+vec2 magnetic_occ_grad(vec2 pos) {
+    ivec2 res = textureSize(u_magnetic_material_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    float occ_l = sample_magnetic_occupancy(pos - vec2(cell.x, 0.0));
+    float occ_r = sample_magnetic_occupancy(pos + vec2(cell.x, 0.0));
+    float occ_b = sample_magnetic_occupancy(pos - vec2(0.0, cell.y));
+    float occ_t = sample_magnetic_occupancy(pos + vec2(0.0, cell.y));
+    return vec2((occ_r - occ_l) / max(2.0 * cell.x, 1e-5),
+                (occ_t - occ_b) / max(2.0 * cell.y, 1e-5));
+}
+
+float sample_sdf_distance(vec2 pos) {
+    if (u_use_sdf == 0) return 1e6;
+    vec2 uv = (pos - u_sdf_world_min) / (u_sdf_world_max - u_sdf_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1e6;
+    return texture(u_sdf_tex, uv).r;
+}
+
+vec2 sample_sdf_normal(vec2 pos) {
+    vec2 texel = (u_sdf_world_max - u_sdf_world_min) / vec2(textureSize(u_sdf_tex, 0));
+    float dx = sample_sdf_distance(pos + vec2(texel.x, 0.0)) - sample_sdf_distance(pos - vec2(texel.x, 0.0));
+    float dy = sample_sdf_distance(pos + vec2(0.0, texel.y)) - sample_sdf_distance(pos - vec2(0.0, texel.y));
+    vec2 g = vec2(dx, dy);
+    float gl = length(g);
+    return (gl > 1e-6) ? (g / gl) : vec2(0.0, 1.0);
+}
+
+float sample_air_temp(vec2 pos) {
+    if (u_use_air_heat == 0) return u_ambient_temp;
+    vec2 uv = (pos - u_air_world_min) / (u_air_world_max - u_air_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return u_ambient_temp;
+    return texture(u_air_temp_tex, uv).r;
+}
+
+float sample_sdf_contact_temp(vec2 pos, out float contact_w) {
+    contact_w = 0.0;
+    if (u_use_sdf == 0 || u_use_air_heat == 0) return u_ambient_temp;
+    float sdf_d = sample_sdf_distance(pos);
+    if (sdf_d < 0.0) {
+        contact_w = 1.0;
+        return sample_air_temp(pos);
+    }
+    ivec2 air_res = textureSize(u_air_temp_tex, 0);
+    vec2 air_cell = (u_air_world_max - u_air_world_min) / vec2(max(air_res, ivec2(1)));
+    float probe = max(max(air_cell.x, air_cell.y) * 1.6, 0.02);
+    if (sdf_d > probe * 1.4) return u_ambient_temp;
+    vec2 n = sample_sdf_normal(pos);
+    vec2 inside = pos - n * (sdf_d + probe);
+    contact_w = 1.0 - clamp(sdf_d / max(probe * 1.4, 1e-5), 0.0, 1.0);
+    return sample_air_temp(inside);
+}
+
+vec2 sample_bio_uv(vec2 pos) {
+    return (pos - u_air_world_min) / (u_air_world_max - u_air_world_min);
+}
+
+float sample_bio_a(vec2 pos) {
+    if (u_use_bio_field == 0) return 1.0;
+    vec2 uv = sample_bio_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    return texture(u_bio_a_tex, uv).r;
+}
+
+float sample_bio_b(vec2 pos) {
+    if (u_use_bio_field == 0) return 0.0;
+    vec2 uv = sample_bio_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_bio_b_tex, uv).r;
+}
+
+vec2 sample_bio_b_gradient(vec2 pos) {
+    if (u_use_bio_field == 0) return vec2(0.0);
+    ivec2 res = textureSize(u_bio_b_tex, 0);
+    vec2 span = u_air_world_max - u_air_world_min;
+    vec2 cell = span / vec2(max(res, ivec2(1)));
+    float bl = sample_bio_b(pos - vec2(cell.x, 0.0));
+    float br = sample_bio_b(pos + vec2(cell.x, 0.0));
+    float bd = sample_bio_b(pos - vec2(0.0, cell.y));
+    float bu = sample_bio_b(pos + vec2(0.0, cell.y));
+    return vec2((br - bl) / max(2.0 * cell.x, 1e-5),
+                (bu - bd) / max(2.0 * cell.y, 1e-5));
+}
+
+float sample_bio_source(vec2 pos) {
+    if (u_use_bio_field == 0) return 0.0;
+    vec2 uv = sample_bio_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_bio_source_tex, uv).r;
+}
+
+vec2 sample_bio_source_gradient(vec2 pos) {
+    if (u_use_bio_field == 0) return vec2(0.0);
+    ivec2 res = textureSize(u_bio_source_tex, 0);
+    vec2 span = u_air_world_max - u_air_world_min;
+    vec2 cell = span / vec2(max(res, ivec2(1)));
+    float sl = sample_bio_source(pos - vec2(cell.x, 0.0));
+    float sr = sample_bio_source(pos + vec2(cell.x, 0.0));
+    float sd = sample_bio_source(pos - vec2(0.0, cell.y));
+    float su = sample_bio_source(pos + vec2(0.0, cell.y));
+    return vec2((sr - sl) / max(2.0 * cell.x, 1e-5),
+                (su - sd) / max(2.0 * cell.y, 1e-5));
+}
+
+float sample_automata(vec2 pos) {
+    if (u_use_automata_field == 0) return 0.0;
+    vec2 uv = sample_bio_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_automata_tex, uv).r;
+}
+
+vec2 sample_automata_gradient(vec2 pos) {
+    if (u_use_automata_field == 0) return vec2(0.0);
+    ivec2 res = textureSize(u_automata_tex, 0);
+    vec2 span = u_air_world_max - u_air_world_min;
+    vec2 cell = span / vec2(max(res, ivec2(1)));
+    float al = sample_automata(pos - vec2(cell.x, 0.0));
+    float ar = sample_automata(pos + vec2(cell.x, 0.0));
+    float ad = sample_automata(pos - vec2(0.0, cell.y));
+    float au = sample_automata(pos + vec2(0.0, cell.y));
+    return vec2((ar - al) / max(2.0 * cell.x, 1e-5),
+                (au - ad) / max(2.0 * cell.y, 1e-5));
+}
+
+float sample_bio_support(vec2 pos) {
+    if (u_use_bio_field == 0 && u_use_automata_field == 0) return 0.0;
+    vec2 uv = sample_bio_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_bio_support_tex, uv).r;
+}
+
+vec2 sample_bio_support_gradient(vec2 pos) {
+    if (u_use_bio_field == 0 && u_use_automata_field == 0) return vec2(0.0);
+    ivec2 res = textureSize(u_bio_support_tex, 0);
+    vec2 span = u_air_world_max - u_air_world_min;
+    vec2 cell = span / vec2(max(res, ivec2(1)));
+    float sl = sample_bio_support(pos - vec2(cell.x, 0.0));
+    float sr = sample_bio_support(pos + vec2(cell.x, 0.0));
+    float sd = sample_bio_support(pos - vec2(0.0, cell.y));
+    float su = sample_bio_support(pos + vec2(0.0, cell.y));
+    return vec2((sr - sl) / max(2.0 * cell.x, 1e-5),
+                (su - sd) / max(2.0 * cell.y, 1e-5));
+}
+
+vec2 cavity_uv(vec2 pos) {
+    return (pos - u_air_world_min) / (u_air_world_max - u_air_world_min);
+}
+
+float sample_airtight_pressure(vec2 pos) {
+    if (u_use_airtight_pressure == 0) return 0.0;
+    vec2 uv = cavity_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return texture(u_airtight_pressure_tex, uv).r;
+}
+
+float sample_airtight_trapped(vec2 pos) {
+    if (u_use_airtight_pressure == 0) return 0.0;
+    vec2 uv = cavity_uv(pos);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    return 1.0 - texture(u_airtight_outside_tex, uv).r;
+}
+
+vec2 sample_airtight_pressure_gradient(vec2 pos) {
+    if (u_use_airtight_pressure == 0) return vec2(0.0);
+    vec2 span = u_air_world_max - u_air_world_min;
+    vec2 step_uv = 1.0 / vec2(max(u_cavity_res, ivec2(1)));
+    vec2 du = vec2(step_uv.x, 0.0);
+    vec2 dv = vec2(0.0, step_uv.y);
+    vec2 uv = clamp(cavity_uv(pos), vec2(0.0), vec2(1.0));
+    float pl = texture(u_airtight_pressure_tex, clamp(uv - du, vec2(0.0), vec2(1.0))).r;
+    float pr = texture(u_airtight_pressure_tex, clamp(uv + du, vec2(0.0), vec2(1.0))).r;
+    float pd = texture(u_airtight_pressure_tex, clamp(uv - dv, vec2(0.0), vec2(1.0))).r;
+    float pu = texture(u_airtight_pressure_tex, clamp(uv + dv, vec2(0.0), vec2(1.0))).r;
+    float dx = max(span.x * step_uv.x, 1e-5);
+    float dy = max(span.y * step_uv.y, 1e-5);
+    return vec2((pr - pl) / (2.0 * dx), (pu - pd) / (2.0 * dy));
+}
+
+float sample_contact_temp(ivec2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_grid_res.x || cell.y >= u_grid_res.y) return 0.0;
+    uint ci = uint(cell.y * u_grid_res.x + cell.x);
+    return float(grid_contact_temp[ci]) * 0.001;
+}
+
+vec4 thermal_coupling_defaults(uint mat_type) {
+    if (mat_type == 7u) return vec4(0.90, 1.18, 0.46, 0.28);
+    if (mat_type == 8u) return vec4(0.90, 1.35, 0.16, 0.96);
+    if (mat_type == 16u) return vec4(1.15, 1.10, 0.48, 0.36);
+    if (mat_type == 21u) return vec4(1.35, 1.45, 0.70, 0.08);
+    if (mat_type == 25u) return vec4(1.25, 1.25, 0.60, 0.18);
+    if (mat_type == 3u) return vec4(1.0, 1.0, 0.70, 0.16);
+    if (mat_type == 11u) return vec4(1.0, 1.0, 0.62, 0.14);
+    if (mat_type == 19u || mat_type == 23u || mat_type == 27u) return vec4(1.0, 1.0, 0.80, 0.28);
+    if (mat_type == 29u) return vec4(1.0, 1.0, 0.72, 0.18);
+    if (mat_type == 14u || mat_type == 28u) return vec4(1.0, 1.0, 0.82, 0.08);
+    if (mat_type == 24u) return vec4(1.0, 1.0, 0.88, 0.05);
+    if (mat_type == 30u) return vec4(0.10, 0.85, 0.72, 0.04);
+    if (mat_type == 31u) return vec4(0.00, 0.75, 0.72, 0.06);
+    if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
+    if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
+    if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
+    if (mat_type == 35u) return vec4(0.55, 0.82, 0.78, 0.06);
+    if (mat_type == 36u) return vec4(0.75, 0.70, 0.82, 0.10);
+    if (mat_type == 37u) return vec4(0.82, 0.68, 0.80, 0.10);
+    if (mat_type == 38u) return vec4(0.34, 0.88, 0.76, 0.04);
+    if (mat_type == 40u) return vec4(0.96, 0.90, 0.86, 0.08);
+    if (mat_type == 41u) return vec4(0.82, 0.68, 0.84, 0.08);
+    if (mat_type == 42u) return vec4(0.28, 0.94, 0.78, 0.03);
+    if (mat_type == 43u) return vec4(0.62, 0.84, 0.80, 0.05);
+    if (mat_type == 44u) return vec4(0.88, 0.60, 0.88, 0.08);
+    if (mat_type == 45u) return vec4(0.24, 0.98, 0.82, 0.02);
+    if (mat_type == 46u) return vec4(0.78, 0.74, 0.84, 0.08);
+    if (mat_type == 47u) return vec4(0.86, 0.66, 0.88, 0.08);
+    if (mat_type == 48u) return vec4(0.42, 0.90, 0.80, 0.04);
+    if (mat_type == 49u) return vec4(0.70, 0.72, 0.82, 0.06);
+    if (mat_type == 57u) return vec4(0.02, 0.95, 0.86, 0.01);
+    if (mat_type == 58u) return vec4(0.02, 0.92, 0.84, 0.02);
+    if (mat_type == 59u) return vec4(0.04, 0.28, 0.92, 0.04);
+    if (mat_type == 60u) return vec4(0.02, 0.20, 0.88, 0.02);
+    if (mat_type == 61u) return vec4(0.02, 0.18, 0.90, 0.03);
+    if (mat_type == 62u) return vec4(1.55, 1.70, 0.60, 0.03);
+    if (mat_type == 63u) return vec4(0.18, 0.34, 0.88, 0.10);
+    if (mat_type == 64u) return vec4(0.12, 0.24, 0.92, 0.05);
+    if (mat_type == 65u) return vec4(0.16, 0.28, 0.88, 0.08);
+    if (mat_type == 66u) return vec4(0.08, 0.18, 0.92, 0.04);
+    return vec4(1.0, 1.0, 1.0, 0.18);
+}
+
+vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
+    if (u_use_real_magnetics == 0 || susceptibility <= 1e-5 || u_magnetic_force_scale <= 1e-5) return vec2(0.0);
+
+    ivec2 res = textureSize(u_magnetic_field_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    float h2_l = sample_magnetic_field_bulk(pos - vec2(cell.x, 0.0)).w;
+    float h2_r = sample_magnetic_field_bulk(pos + vec2(cell.x, 0.0)).w;
+    float h2_b = sample_magnetic_field_bulk(pos - vec2(0.0, cell.y)).w;
+    float h2_t = sample_magnetic_field_bulk(pos + vec2(0.0, cell.y)).w;
+    vec2 grad_h2 = vec2((h2_r - h2_l) / max(2.0 * cell.x, 1e-5),
+                        (h2_t - h2_b) / max(2.0 * cell.y, 1e-5));
+    float bulk_h2 = sample_magnetic_field_bulk(pos).w;
+    float local_h2 = sample_magnetic_field_smooth(pos).w;
+    float sharpness = max(local_h2 - bulk_h2, 0.0) / max(bulk_h2, 1e-4);
+    float grad_mag = length(grad_h2);
+    float grad_ratio = grad_mag / max(local_h2, 1e-4);
+    float bulk_ratio = clamp(bulk_h2 / max(local_h2, 1e-4), 0.0, 1.0);
+    // Kelvin body force: F/m = (chi/2) * grad|H|^2.
+    // u_magnetic_force_scale bundles the unit-reconciliation factor (μ₀/ρ)
+    // since |H| here is in solver units, not SI A/m.
+    vec2 f = 0.5 * susceptibility * u_magnetic_force_scale * grad_h2;
+    // Aggressively suppress near-field rigid-magnet spikes. The ferro
+    // constitutive path can still use the sharper field for shaping, but
+    // bulk translation should only see the low-frequency scene component.
+    float hf_suppress = bulk_ratio / (1.0 + 2.1 * sharpness + 0.08 * grad_ratio);
+    float d = sample_sdf_distance(pos);
+    float wall_gate = mix(0.22, 1.0, smoothstep(u_dx * 2.0, u_dx * 7.0, max(d, 0.0)));
+    hf_suppress *= wall_gate;
+    f *= hf_suppress;
+    // Safety clamp against solver spikes at coarse cell boundaries.
+    // Real ferrofluid experiments see ~1-3g peak body-force acceleration
+    // (they work against gravity but only marginally). 15 m/s² = 1.5g
+    // gives visible pull without overwhelming solid materials that
+    // happen to also be magnetizable (e.g. soft iron, magnetic rubber),
+    // whose elastic restoring force at moderate E cannot absorb more
+    // without runaway deformation. The previous 50 was causing soft
+    // magnetic solids to explode.
+    float mag = length(f);
+    float max_force = max(force_limit, 0.0);
+    if (mag > max_force) f *= max_force / mag;
+    return f;
+}
+
+vec2 ferro_surface_force(vec2 pos) {
+    if (u_use_real_magnetics == 0) return vec2(0.0);
+
+    vec4 drive_f = sample_magnetic_field_smooth(pos);
+    vec4 total_f = sample_magnetic_total_field_smooth(pos);
+    float induced_gain = clamp((total_f.z - drive_f.z) / max(drive_f.z, 1e-4), 0.0, 1.0);
+    vec2 align_vec = mix(drive_f.xy, total_f.xy, 0.18 * induced_gain);
+    float hmag = mix(drive_f.z, total_f.z, 0.08 * induced_gain);
+    if (hmag <= 1e-5) return vec2(0.0);
+
+    float occ = sample_magnetic_occupancy(pos);
+    float occ_support = sample_magnetic_occupancy_smooth(pos);
+    vec2 occ_grad = magnetic_occ_grad(pos);
+    float occ_grad_mag = length(occ_grad);
+    if (occ_grad_mag <= 1e-5 || occ <= 1e-4) return vec2(0.0);
+
+    // Once the puddle has already atomized into isolated grains, stop
+    // applying the free-surface shaping force that is meant for a
+    // connected liquid interface. Otherwise each lone particle behaves
+    // like its own tiny spike emitter and turns into shrapnel.
+    float cohesion_gate = smoothstep(0.18, 0.52, occ_support);
+    if (cohesion_gate <= 1e-4) return vec2(0.0);
+
+    vec2 n_in = occ_grad / occ_grad_mag;
+    vec2 n_out = -n_in;
+    vec2 field_dir = normalize(align_vec + vec2(1e-6, 0.0));
+    float normal_align = abs(dot(field_dir, n_out));
+    float interface_band = smoothstep(0.06, 0.28, occ_grad_mag) *
+                           smoothstep(0.05, 0.22, occ) *
+                           cohesion_gate;
+    if (interface_band <= 1e-4) return vec2(0.0);
+
+    float sat = 1.0 - exp(-hmag * 0.34);
+    float capillary = 0.42 + 0.20 * sat;
+    float magnetic_relief = (0.12 + 0.22 * u_magnet_spike_strength) *
+                            sat * normal_align * normal_align;
+    float column_pull = (0.05 + 0.10 * u_magnet_spike_strength) *
+                        sat * normal_align;
+
+    // n_in points toward the interior of the puddle. Capillary force
+    // therefore pulls along +n_in, while magnetic normal traction
+    // subtracts from it and can locally push the interface outward.
+    vec2 f = (capillary - magnetic_relief) * n_in * interface_band;
+    f += field_dir * column_pull * interface_band;
+    float mag = length(f);
+    float max_force = mix(0.45, 1.6, cohesion_gate);
+    if (mag > max_force) f *= max_force / mag;
+    return f;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    vec2 pos = positions[p];
+    vec2 old_vel = velocities[p];
+    uint mat_type = material_ids[p];
+    vec4 thermal_params = thermal_coupling_defaults(mat_type);
+
+    float inv_dx = 1.0 / u_dx;
+    vec2 cell_pos = (pos - u_grid_origin) * inv_dx;
+    ivec2 base = ivec2(floor(cell_pos - 0.5));
+    vec2 fx = cell_pos - vec2(base);
+    vec3 wx = bspline_weights(fx.x);
+    vec3 wy = bspline_weights(fx.y);
+
+    vec2 new_vel = vec2(0.0);
+    mat2 new_C = mat2(0.0);
+    vec2 bio_debug_force = vec2(0.0);
+    vec2 automata_debug_force = vec2(0.0);
+
+    for (int gy = 0; gy < 3; gy++) {
+        for (int gx = 0; gx < 3; gx++) {
+            ivec2 node = base + ivec2(gx, gy);
+            if (node.x < 0 || node.y < 0 || node.x >= u_grid_res.x || node.y >= u_grid_res.y)
+                continue;
+            float weight = wx[gx] * wy[gy];
+            uint cell = uint(node.y * u_grid_res.x + node.x);
+            vec2 g_vel = vec2(grid_vel_x[cell], grid_vel_y[cell]);
+            vec2 dpos = (vec2(node) - cell_pos) * u_dx;
+            new_vel += weight * g_vel;
+            new_C += 4.0 * inv_dx * inv_dx * weight * mat2(
+                g_vel.x*dpos.x, g_vel.x*dpos.y,
+                g_vel.y*dpos.x, g_vel.y*dpos.y);
+        }
+    }
+
+    float max_speed_cells = 3.0;
+    if (mat_type == 31u) max_speed_cells = 0.45;      // ferro should never become ballistic shrapnel
+    else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
+    else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
+
+    // Initial clamp on gathered grid velocity.
+    float speed = length(new_vel);
+    float max_speed = u_dx * max_speed_cells / u_dt;
+    if (speed > max_speed) { new_vel *= max_speed / speed; new_C *= max_speed / speed; }
+
+    // Buoyancy for burning/ember particles
+    float temp_here = temperatures[p];
+    if (mat_type == 7u || mat_type == 8u || mat_type == 16u || mat_type == 25u) { // burning / ember / flammable fluid / reactive burn
+        float burn = damage[idx];
+        bool is_ember = (mat_type == 8u);
+        bool is_flammable_fluid = (mat_type == 16u);
+        bool is_reactive_burn = (mat_type == 25u);
+        float loft = clamp(thermal_params.w, 0.0, 2.0);
+        if (u_use_airtight_pressure != 0) {
+            float trapped = sample_airtight_trapped(pos);
+            float trapped_gate = smoothstep(0.02, 0.14, trapped);
+            float trapped_loft_keep = is_ember ? 0.0
+                                    : (is_flammable_fluid ? 0.35
+                                    : (is_reactive_burn ? 0.12 : 0.08));
+            loft *= mix(1.0, trapped_loft_keep, trapped_gate);
+        }
+        float buoy_gate = is_ember ? burn : smoothstep(0.80, 1.0, burn);
+        if (buoy_gate > 0.0 && loft > 0.0) {
+            float heat_f = clamp((temp_here - 350.0) / 400.0, 0.0, 1.0);
+            float buoy = is_ember ? 22.0 : (is_flammable_fluid ? 5.0 : 7.5);
+            buoy *= heat_f;
+            new_vel.y += buoy * buoy_gate * loft * u_dt;
+            float drag = is_ember ? 0.18 : (is_flammable_fluid ? 0.08 : 0.18);
+            new_vel *= (1.0 - drag * u_dt);
+        }
+    }
+
+    if (u_use_real_magnetics != 0) {
+        float susceptibility = 0.0;
+        float max_mag_force = 0.0;
+        if (mat_type == 31u) { susceptibility = 0.12; max_mag_force = 1.8; }   // ferro: low-frequency bulk drift only; interface shaping should dominate
+        else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron: tiny translation aid only
+        else if (mat_type == 58u) { susceptibility = 0.26; max_mag_force = 2.8; }   // magnetic rubber: shape response should dominate over raw pull
+        if (susceptibility > 0.0) {
+            vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
+            new_vel += mag_force * u_dt;
+            if (mat_type == 58u) {
+                new_vel *= (1.0 - 0.10 * u_dt);
+            }
+        }
+
+        if (mat_type == 31u) {
+            float hmag = sample_magnetic_field_smooth(pos).z;
+            float capillary_gate = 0.35 + 0.65 * smoothstep(0.18, 1.1, hmag);
+            new_vel += ferro_surface_force(pos) * capillary_gate * u_dt;
+        }
+    }
+
+    if (u_kinematic_targets_active != 0) {
+        float w = spring_weight[idx];
+        if (w > 0.0) {
+            vec2 target_pos = spring_anchor[idx];
+            vec2 to_target = target_pos - pos;
+            new_vel += (to_target * (u_kinematic_target_force * w)
+                        - new_vel * (u_kinematic_target_damping * w)) * u_dt;
+        }
+    }
+
+    // Mode 3: Real Drag — per-particle targets maintain shape
+    if (u_mouse_mode == 3) {
+        float w = spring_weight[idx];
+        if (w > 0.0) {
+            vec2 target_pos = u_mouse_world + spring_anchor[idx];
+            vec2 to_target = target_pos - pos;
+            new_vel += (to_target * (u_mouse_force * w) - new_vel * (u_mouse_damping * w)) * u_dt;
+        }
+    }
+    // Mode 1: Telekinesis — uniform force vector for all selected particles
+    if (u_mouse_mode == 1) {
+        float w = spring_weight[idx];
+        if (w > 0.0) {
+            vec2 force_dir = u_mouse_world - u_spring_origin;
+            new_vel += (force_dir * (u_mouse_force * w) - new_vel * (u_mouse_damping * w)) * u_dt;
+        }
+    }
+
+    // (Former fallback cursor magnet removed: the cursor is now always a
+    //  dragged bar magnet in the real magnetics solver, so the Kelvin body
+    //  force at line ~177 handles it via the solved |H|^2 gradient.)
+
+    // Per-material gravity scaling (only when multi-scale mode is on)
+    if (u_multi_scale == 1) {
+        float grav_scale = 1.0;
+        if (mat_type == 4u) grav_scale = 0.15;
+        else if (mat_type == 9u || mat_type == 10u || mat_type == 22u || mat_type == 26u) grav_scale = 0.12;
+        else if (mat_type == 19u || mat_type == 23u || mat_type == 27u) grav_scale = 0.10;
+        else if (mat_type == 6u) grav_scale = 0.15;
+        else if (mat_type == 30u) grav_scale = 0.12;
+        else if (mat_type == 29u) grav_scale = 0.08;
+        else if (mat_type == 14u || mat_type == 28u) grav_scale = 0.08;
+        else if (mat_type == 32u || mat_type == 33u) grav_scale = 0.06;
+        else if (mat_type == 34u) grav_scale = 0.10;
+        else if (mat_type == 35u) grav_scale = 0.11;
+        else if (mat_type == 36u) grav_scale = 0.08;
+        else if (mat_type == 37u) grav_scale = 0.09;
+        else if (mat_type == 38u) grav_scale = 0.11;
+        else if (mat_type == 39u) grav_scale = 0.16;
+        else if (mat_type == 40u) grav_scale = 0.14;
+        else if (mat_type == 41u) grav_scale = 0.10;
+        else if (mat_type == 42u) grav_scale = 0.11;
+        else if (mat_type == 43u) grav_scale = 0.10;
+        else if (mat_type == 44u) grav_scale = 0.10;
+        else if (mat_type == 45u) grav_scale = 0.12;
+        else if (mat_type == 46u) grav_scale = 0.10;
+        else if (mat_type == 47u) grav_scale = 0.10;
+        else if (mat_type == 48u) grav_scale = 0.11;
+        else if (mat_type == 49u) grav_scale = 0.08;
+        else if (mat_type == 59u) grav_scale = 0.10;
+        else if (mat_type == 60u) grav_scale = 0.12;
+        else if (mat_type == 61u) grav_scale = 0.12;
+        else if (mat_type == 63u) grav_scale = 0.16;
+        else if (mat_type == 64u) grav_scale = 0.18;
+        else if (mat_type == 65u) grav_scale = 0.14;
+        else if (mat_type == 66u) grav_scale = 0.14;
+        else if (mat_type == 17u) grav_scale = 0.10;
+        else if (mat_type == 20u) grav_scale = 0.10;
+        else if (mat_type == 3u || mat_type == 5u || mat_type == 11u) grav_scale = 0.25;
+        else if (mat_type == 12u || mat_type == 13u) grav_scale = 0.20;
+        else if (mat_type == 24u) grav_scale = 0.15;
+        else if (mat_type == 15u || mat_type == 18u) grav_scale = 0.10;
+        if (grav_scale < 0.99)
+            new_vel.y += (grav_scale - 1.0) * u_gravity.y * u_dt;
+    }
+
+    // Final clamp after buoyancy / magnetic / drag-tool forces. This is
+    // the stage that previously let burning or magnetic particles escape
+    // the early clamp and become high-energy pellets.
+    speed = length(new_vel);
+    if (speed > max_speed) {
+        float s = max_speed / max(speed, 1e-6);
+        new_vel *= s;
+        new_C *= s;
+    }
+
+    float impact_delta = length(new_vel - old_vel);
+    float impact_norm = impact_delta / max(max_speed * 0.20, 1e-5);
+    float strain_proxy = clamp(length(vec4(new_C[0], new_C[1])) * (u_dx * u_dt * 0.08), 0.0, 1.0);
+    float hit_signal = clamp(impact_norm + strain_proxy * 0.65, 0.0, 1.0);
+
+    // Advect
+    vec2 new_pos = pos + u_dt * new_vel;
+    float collision_heat = 0.0;
+
+    // Particle-level SDF collision
+    if (u_use_sdf == 1) {
+        float foot_contact = (u_kinematic_targets_active != 0) ? clamp(spring_weight[idx], 0.0, 1.0) : 0.0;
+        float contact_margin = mix(0.003, 0.022, foot_contact);
+        vec2 uv = (new_pos - u_sdf_world_min) / (u_sdf_world_max - u_sdf_world_min);
+        if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+            float d = texture(u_sdf_tex, uv).r;
+            vec2 collision_pos = new_pos;
+            if (foot_contact > 0.0) {
+                for (int s = 1; s <= 4; ++s) {
+                    float t = float(s) * 0.25;
+                    vec2 probe = mix(pos, new_pos, t);
+                    vec2 probe_uv = (probe - u_sdf_world_min) / (u_sdf_world_max - u_sdf_world_min);
+                    if (probe_uv.x < 0.0 || probe_uv.x > 1.0 || probe_uv.y < 0.0 || probe_uv.y > 1.0) continue;
+                    float ds = texture(u_sdf_tex, probe_uv).r;
+                    if (ds < d) {
+                        d = ds;
+                        uv = probe_uv;
+                        collision_pos = probe;
+                    }
+                }
+            }
+            if (d < contact_margin) {
+                vec2 pre_collision_vel = new_vel;
+                vec2 eps = (u_sdf_world_max - u_sdf_world_min) / vec2(textureSize(u_sdf_tex, 0));
+                float gdx = texture(u_sdf_tex, uv+vec2(eps.x,0)).r - texture(u_sdf_tex, uv-vec2(eps.x,0)).r;
+                float gdy = texture(u_sdf_tex, uv+vec2(0,eps.y)).r - texture(u_sdf_tex, uv-vec2(0,eps.y)).r;
+                vec2 n = normalize(vec2(gdx, gdy) + 1e-6);
+                new_pos = collision_pos + n * (contact_margin - d);
+                float vn = dot(new_vel, n);
+                if (vn < 0.0) new_vel -= mix(1.3, 1.65, foot_contact) * vn * n;
+                vec2 tangent = vec2(-n.y, n.x);
+                float vt = dot(new_vel, tangent);
+                new_vel -= vt * mix(0.08, 0.28, foot_contact) * tangent;
+                float impact_speed = max(-dot(pre_collision_vel, n), 0.0);
+                float tangential_speed = abs(dot(pre_collision_vel, tangent));
+                float high_speed_gate = smoothstep(8.0, 24.0, impact_speed + tangential_speed * 0.6);
+                if (high_speed_gate > 0.0) {
+                    collision_heat = max(collision_heat,
+                                         (40.0 + 220.0 * high_speed_gate) *
+                                         max(impact_speed + tangential_speed * 0.45 - 8.0, 0.0) / 16.0);
+                }
+                speed = length(new_vel);
+                if (speed > max_speed) new_vel *= max_speed / max(speed, 1e-6);
+                velocities[p] = new_vel * mix(0.95, 0.90, foot_contact);
+            }
+        }
+    }
+
+    // Grid bounds clamp
+    vec2 gmax = u_grid_origin + vec2(u_grid_res) * u_dx;
+    float pad = u_dx * 3.0;
+    new_pos = clamp(new_pos, u_grid_origin + pad, gmax - pad);
+    positions[p] = new_pos;
+
+    bool airtight_shell = (mat_type == 62u || mat_type == 38u);
+    if (airtight_shell && u_use_airtight_pressure != 0) {
+        float cavity_pressure = sample_airtight_pressure(new_pos);
+        float trapped = sample_airtight_trapped(new_pos);
+        if (cavity_pressure > 0.5 && trapped > 0.02) {
+            vec2 grad_p = sample_airtight_pressure_gradient(new_pos);
+            vec2 shell_push = -grad_p;
+            float shell_like = (mat_type == 38u) ? 1.0 : (1.0 - smoothstep(0.14, 0.82, phase_data[idx]));
+            float integrity = (mat_type == 38u)
+                            ? (1.0 - smoothstep(0.18, 0.82, Jp_data[idx]))
+                            : (1.0 - smoothstep(0.24, 0.92, Jp_data[idx]));
+            float pressure_drive = smoothstep(1.5, 260.0, cavity_pressure) * trapped;
+            float push_coeff = (mat_type == 38u) ? 0.34 : 0.24;
+            float crack_coeff = (mat_type == 38u) ? 0.0056 : 0.0028;
+            new_vel += shell_push * pressure_drive * shell_like * integrity * (push_coeff * u_dt);
+            Jp_data[idx] = clamp(Jp_data[idx] + cavity_pressure * shell_like * integrity * crack_coeff * u_dt, 0.0, 1.0);
+        }
+    }
+
+    if (mat_type == 59u) {
+        float split = damage[idx];
+        float heal = phase_data[idx];
+        float pore = Jp_data[idx];
+        split = clamp(max(split, hit_signal * 0.95) - 0.04 * u_dt, 0.0, 1.0);
+        heal = clamp(heal - hit_signal * 0.30 + 0.34 * u_dt * (1.0 - split), 0.0, 1.0);
+        pore = clamp(max(pore, hit_signal * 0.38) - 0.10 * u_dt, 0.0, 1.0);
+        damage[idx] = split;
+        phase_data[idx] = heal;
+        Jp_data[idx] = pore;
+    } else if (mat_type == 60u) {
+        float jam = damage[idx];
+        float yielded = phase_data[idx];
+        float compact = Jp_data[idx];
+        jam = clamp(max(jam, hit_signal * 1.35) - 0.02 * u_dt, 0.0, 1.0);
+        yielded = clamp(max(yielded, hit_signal * 0.48) - 0.05 * u_dt, 0.0, 1.0);
+        compact = clamp(max(compact, hit_signal * 0.42) - 0.04 * u_dt, 0.0, 1.0);
+        damage[idx] = jam;
+        phase_data[idx] = yielded;
+        Jp_data[idx] = compact;
+    } else if (mat_type == 61u) {
+        float hard = damage[idx];
+        float memory = phase_data[idx];
+        float bruise = Jp_data[idx];
+        hard = clamp(max(hard, hit_signal * 1.02) - 0.010 * u_dt, 0.0, 1.0);
+        memory = clamp(max(memory, hit_signal * 1.06) - 0.015 * u_dt, 0.0, 1.0);
+        bruise = clamp(max(bruise, hit_signal * 0.60) - 0.05 * u_dt, 0.0, 1.0);
+        damage[idx] = hard;
+        phase_data[idx] = memory;
+        Jp_data[idx] = bruise;
+    }
+
+    velocities[p] = new_vel;
+    affine_moms[idx] = vec4(new_C[0].x, new_C[0].y, new_C[1].x, new_C[1].y);
+
+    // --- Thermal system ---
+    float temp = temperatures[p];
+
+    // Which materials respond to temperature?
+    // Full thermal: interact with MPM grid temp + sources + ambient cooling
+    bool full_thermal = (mat_type == 4u || mat_type == 6u ||
+                         mat_type == 7u || mat_type == 8u ||
+                         mat_type == 12u || mat_type == 13u ||
+                         mat_type == 14u || mat_type == 15u ||
+                         mat_type == 16u || mat_type == 17u ||
+                         mat_type == 18u || mat_type == 19u ||
+                         mat_type == 20u || mat_type == 21u ||
+                         mat_type == 22u || mat_type == 23u ||
+                         mat_type == 24u || mat_type == 25u ||
+                         mat_type == 26u || mat_type == 27u ||
+                         mat_type == 28u || mat_type == 29u ||
+                         mat_type == 30u || mat_type == 31u ||
+                         mat_type == 32u || mat_type == 33u ||
+                         mat_type == 34u || mat_type == 35u ||
+                         mat_type == 36u || mat_type == 37u ||
+                         mat_type == 38u || mat_type == 40u ||
+                         mat_type == 41u || mat_type == 42u ||
+                         mat_type == 43u || mat_type == 44u ||
+                         mat_type == 45u || mat_type == 46u ||
+                         mat_type == 47u || mat_type == 48u ||
+                         mat_type == 49u || mat_type == 62u ||
+                         mat_type == 63u || mat_type == 64u || mat_type == 65u ||
+                         mat_type == 66u);
+    // Heat source only: gun + scene source + grid contact, no ambient cooling
+    // Includes structural materials so they CAN be heated/ignited
+    bool heat_source_only = (mat_type == 3u || mat_type == 5u ||
+                             mat_type == 9u || mat_type == 10u || mat_type == 11u);
+    // 3=ANISO, 5=FRACTURE, 9=HARDEN, 10=CERAMIC, 11=COMPOSITE
+    // ELASTIC(1) and SNOW(2) remain completely non-thermal
+    bool any_thermal = full_thermal || heat_source_only;
+
+    if (any_thermal) {
+        if (collision_heat > 0.0) {
+            float friction_heat_gate = smoothstep(0.0, 120.0, collision_heat);
+            temp += collision_heat * friction_heat_gate;
+        }
+        float ballistic_heat = smoothstep(0.45, 1.55, hit_signal) * smoothstep(7.0, 24.0, impact_delta * 18.0);
+        if (ballistic_heat > 0.0) {
+            temp += ballistic_heat * (6.0 + 36.0 * ballistic_heat);
+        }
+        float target_stall = 1.0 - smoothstep(3.0, 14.0, length(new_vel));
+        float target_flash = smoothstep(0.10, 0.46, strain_proxy) *
+                             smoothstep(1.4, 8.5, impact_delta) * target_stall;
+        if (target_flash > 0.0) {
+            temp += target_flash * (26.0 + 160.0 * target_flash);
+        }
+        // Grid-based heat transfer (object-to-object contact)
+        // All thermal materials get this — needed for fire propagation
+        if (full_thermal || heat_source_only) {
+            float grid_temp_avg = 0.0;
+            float grid_temp_weight = 0.0;
+            for (int tgy = 0; tgy < 3; tgy++) {
+                for (int tgx = 0; tgx < 3; tgx++) {
+                    ivec2 tn = base + ivec2(tgx, tgy);
+                    if (tn.x < 0 || tn.y < 0 || tn.x >= u_grid_res.x || tn.y >= u_grid_res.y)
+                        continue;
+                    float tw = wx[tgx] * wy[tgy];
+                    uint tc = uint(tn.y * u_grid_res.x + tn.x);
+                    float gt = grid_temp[tc];
+                    if (gt > 0.0) {
+                        grid_temp_avg += tw * gt;
+                        grid_temp_weight += tw;
+                    }
+                }
+            }
+            if (grid_temp_weight > 0.01) {
+                float gathered_temp = grid_temp_avg / grid_temp_weight;
+                // Burning/ember particles resist grid cooling (they generate their own heat)
+                float gather_rate = 1.0;
+                if (mat_type == 7u || mat_type == 8u || mat_type == 16u || mat_type == 21u || mat_type == 25u || mat_type == 62u) {
+                    // Only absorb heat FROM hotter neighbors, not cooler ones
+                    if (gathered_temp < temp) gather_rate = 0.1;
+                }
+                if (mat_type == 62u && gathered_temp > temp + 2.0) gather_rate = 1.18;
+                temp += (gathered_temp - temp) * gather_rate * u_dt;
+            }
+        }
+
+        // Ambient heat source (from scene)
+        if (u_heat_src_temp > 0.0) {
+            float hd = length(new_pos - u_heat_src_pos);
+            if (hd < u_heat_src_radius) {
+                float falloff = 1.0 - hd / u_heat_src_radius;
+                temp += (u_heat_src_temp - temp) * falloff * 0.5 * u_dt;
+            }
+        }
+        // Heat gun (interactive) — strong for direct contact
+        if (u_heat_power != 0.0) {
+            float hd = length(new_pos - u_heat_pos);
+            if (hd < u_heat_radius) {
+                float falloff = 1.0 - hd / u_heat_radius;
+                temp += u_heat_power * falloff * u_dt;
+            }
+        }
+        if (u_use_air_heat != 0 && (full_thermal || heat_source_only)) {
+            float air_temp = sample_air_temp(new_pos);
+            float air_surplus = air_temp - temp;
+            if (air_temp > u_ambient_temp + 20.0 && air_surplus > 2.0) {
+                float plume = smoothstep(u_ambient_temp + 30.0, u_ambient_temp + 320.0, air_temp);
+                float air_couple = heat_source_only ? 0.18 : 0.24;
+                if (mat_type == 7u || mat_type == 8u || mat_type == 16u || mat_type == 21u || mat_type == 25u || mat_type == 62u) {
+                    air_couple = (mat_type == 16u) ? 0.42 : 0.48;
+                }
+                float transfer_gate = smoothstep(8.0, 120.0, air_surplus);
+                if (mat_type == 7u || mat_type == 8u || mat_type == 16u || mat_type == 21u || mat_type == 25u || mat_type == 62u) {
+                    transfer_gate = smoothstep(4.0, 80.0, air_surplus);
+                }
+                temp += air_surplus * air_couple * plume * transfer_gate * u_dt;
+            }
+        }
+        if (u_use_sdf == 1 && (full_thermal || heat_source_only)) {
+            float sdf_contact_w = 0.0;
+            float solid_temp = sample_sdf_contact_temp(new_pos, sdf_contact_w);
+            float solid_surplus = solid_temp - temp;
+            if (sdf_contact_w > 1e-4 && solid_surplus > 1.5) {
+                float solid_couple = heat_source_only ? 0.72 : 0.90;
+                if (mat_type == 7u || mat_type == 8u || mat_type == 16u || mat_type == 21u || mat_type == 25u || mat_type == 62u) {
+                    solid_couple = (mat_type == 16u) ? 0.82 : 0.96;
+                }
+                temp += solid_surplus * solid_couple * sdf_contact_w * u_dt;
+            }
+        }
+        if (full_thermal || heat_source_only) {
+            float contact_temp_sum = 0.0;
+            float contact_temp_weight = 0.0;
+            for (int cgy = 0; cgy < 3; ++cgy) {
+                for (int cgx = 0; cgx < 3; ++cgx) {
+                    ivec2 cn = base + ivec2(cgx, cgy);
+                    if (cn.x < 0 || cn.y < 0 || cn.x >= u_grid_res.x || cn.y >= u_grid_res.y) continue;
+                    float ct = sample_contact_temp(cn);
+                    if (ct <= u_ambient_temp + 10.0) continue;
+                    float tw = wx[cgx] * wy[cgy];
+                    contact_temp_sum += tw * ct;
+                    contact_temp_weight += tw;
+                }
+            }
+            if (contact_temp_weight > 0.01) {
+                float contact_temp = contact_temp_sum / contact_temp_weight;
+                if (contact_temp > temp + 3.0) {
+                    float contact_couple = heat_source_only ? 0.32 : 0.45;
+                    if (mat_type == 7u || mat_type == 8u || mat_type == 16u || mat_type == 21u || mat_type == 25u || mat_type == 62u) {
+                        contact_couple = (mat_type == 16u) ? 0.62 : 0.72;
+                    }
+                    if (mat_type == 62u) contact_couple = 0.96;
+                    temp += (contact_temp - temp) * contact_couple * u_dt;
+                }
+            }
+        }
+        // Ambient cooling (only for fully thermal materials)
+        if (full_thermal) {
+            float material_cooling = 1.0;
+            if (mat_type == 7u) material_cooling = 0.40;       // burning solids keep heat
+            else if (mat_type == 8u) material_cooling = 0.20;  // embers / coal hold heat longest
+            else if (mat_type == 16u) material_cooling = 0.28; // oil pools stay hot and can relight
+            else if (mat_type == 3u || mat_type == 11u) material_cooling = 0.62; // woods / composites
+            else if (mat_type == 19u || mat_type == 23u || mat_type == 27u || mat_type == 29u) material_cooling = 0.82;
+            else if (mat_type == 14u || mat_type == 28u) material_cooling = 0.76;
+            else if (mat_type == 24u) material_cooling = 0.88;
+            else if (mat_type == 30u) material_cooling = 0.68;
+            else if (mat_type == 31u) material_cooling = 0.72;
+            else if (mat_type == 32u) material_cooling = 0.62;
+            else if (mat_type == 33u) material_cooling = 0.58;
+            else if (mat_type == 34u) material_cooling = 0.78;
+            else if (mat_type == 35u) material_cooling = 0.74;
+            else if (mat_type == 36u) material_cooling = 0.80;
+            else if (mat_type == 37u) material_cooling = 0.82;
+            else if (mat_type == 38u) material_cooling = 0.76;
+            else if (mat_type == 40u) material_cooling = 0.70;
+            else if (mat_type == 41u) material_cooling = 0.84;
+            else if (mat_type == 42u) material_cooling = 0.74;
+            else if (mat_type == 43u) material_cooling = 0.80;
+            else if (mat_type == 44u) material_cooling = 0.86;
+            else if (mat_type == 45u) material_cooling = 0.70;
+            else if (mat_type == 46u) material_cooling = 0.82;
+            else if (mat_type == 47u) material_cooling = 0.84;
+            else if (mat_type == 48u) material_cooling = 0.74;
+            else if (mat_type == 49u) material_cooling = 0.82;
+            else if (mat_type == 62u) material_cooling = 0.26;
+            else if (mat_type == 63u) material_cooling = 0.78;
+            else if (mat_type == 64u) material_cooling = 0.84;
+            else if (mat_type == 65u) material_cooling = 0.80;
+            else if (mat_type == 66u) material_cooling = 0.86;
+            if (u_enable_pseudo_25d != 0) {
+                float depth_hold = clamp(u_pseudo_25d_depth, 0.0, 2.0);
+                bool bake_kiln_mat = (mat_type == 14u || mat_type == 23u || mat_type == 27u ||
+                                      mat_type == 34u || mat_type == 35u || mat_type == 36u ||
+                                      mat_type == 38u || mat_type == 40u || mat_type == 41u ||
+                                      mat_type == 42u || mat_type == 43u || mat_type == 44u ||
+                                      mat_type == 45u || mat_type == 46u || mat_type == 47u ||
+                                      mat_type == 48u || mat_type == 49u || mat_type == 63u ||
+                                      mat_type == 64u || mat_type == 65u || mat_type == 66u);
+                if (bake_kiln_mat) {
+                    material_cooling *= max(1.0 - 0.18 * depth_hold, 0.55);
+                }
+            }
+            float batch_cooling = max(thermal_params.z, 0.02);
+            temp += (u_ambient_temp - temp) * u_particle_cooling * material_cooling * batch_cooling * u_dt;
+        }
+    }
+    temperatures[p] = clamp(temp, 0.0, 1500.0);
+
+    if ((u_use_bio_field != 0 && u_bio_coupling > 1e-5) ||
+        (u_use_automata_field != 0 && u_automata_coupling > 1e-5)) {
+        float bio_a = clamp(sample_bio_a(new_pos), 0.0, 1.0);
+        float bio_b = clamp(sample_bio_b(new_pos), 0.0, 1.0);
+        float bio_source = clamp(sample_bio_source(new_pos), 0.0, 1.0);
+        vec2 bio_grad = sample_bio_b_gradient(new_pos);
+        vec2 source_grad = sample_bio_source_gradient(new_pos);
+        float bio_grad_mag = length(bio_grad);
+        float source_grad_mag = length(source_grad);
+        float bio_drive = clamp(bio_grad_mag * 0.16, 0.0, 2.2);
+        float source_drive = clamp(source_grad_mag * 0.22, 0.0, 2.8);
+        float bio_coupling = clamp(u_bio_coupling, 0.0, 6.0);
+        float regrow_rate_raw = clamp(u_bio_regrowth_rate, 0.0, 16.0);
+        float regrow_rate = regrow_rate_raw;
+        if (regrow_rate_raw > 1.0) {
+            float hi = regrow_rate_raw - 1.0;
+            regrow_rate = 1.0 + hi * (0.90 + 0.20 * sqrt(hi));
+        }
+        float regrow_front_gain = 1.0 + 0.16 * min(regrow_rate, 18.0);
+
+        float automata = clamp(sample_automata(new_pos), 0.0, 1.0);
+        vec2 automata_grad = sample_automata_gradient(new_pos);
+        float automata_grad_mag = length(automata_grad);
+        float colony_drive = clamp(automata_grad_mag * 0.20, 0.0, 2.4);
+        float automata_coupling = clamp(u_automata_coupling, 0.0, 6.0);
+        float support = clamp(sample_bio_support(new_pos), 0.0, 1.0);
+        vec2 support_grad = sample_bio_support_gradient(new_pos);
+        float support_grad_mag = length(support_grad);
+        vec2 edge_dir = (support_grad_mag > 1e-6) ? (-support_grad / support_grad_mag) : vec2(0.0);
+        float support_edge = clamp(support_grad_mag * 0.18, 0.0, 1.2) *
+                            smoothstep(0.01, 0.22, support) *
+                            (1.0 - smoothstep(0.26, 0.72, support));
+
+        vec2 field_grad = source_grad * bio_coupling * 1.55 +
+                          bio_grad * bio_coupling * 0.85 +
+                          automata_grad * automata_coupling * 1.10;
+        float field_grad_mag = length(field_grad);
+        vec2 field_dir = (field_grad_mag > 1e-6) ? (field_grad / field_grad_mag) : vec2(0.0);
+        float field_drive = clamp(source_drive * bio_coupling + bio_drive * bio_coupling * 0.75 + colony_drive * automata_coupling, 0.0, 6.6);
+        float chemical_growth = bio_b * (0.45 + 0.55 * (1.0 - bio_a));
+        float scout_growth = bio_source * (0.62 + 0.38 * (1.0 - bio_a));
+        float colony_fill = automata * (0.52 + 0.48 * (1.0 - bio_a));
+        float combined_growth = max(max(chemical_growth * bio_coupling, scout_growth * bio_coupling * 1.18), colony_fill * automata_coupling);
+        float bio_front = smoothstep(0.10, 0.28, bio_b) * (1.0 - smoothstep(0.34, 0.62, bio_b));
+        float source_front = smoothstep(0.03, 0.16, bio_source) * (1.0 - smoothstep(0.24, 0.54, bio_source));
+        float colony_front = smoothstep(0.14, 0.38, automata) * (1.0 - smoothstep(0.48, 0.78, automata));
+        float pulse = 0.5 + 0.5 * sin(u_time * 7.5 + bio_b * 18.0 + automata * 11.0);
+        float frontier_push = support_edge * max(max(source_front * 1.15, bio_front), colony_front * 0.9) * pulse;
+        float density_gate = smoothstep(0.04, 0.32, support);
+        float uncovered_bio = clamp(max(max(bio_source * 1.22, bio_b), automata) - density_gate * 0.68, 0.0, 1.0);
+        float lead_pull = uncovered_bio * (0.55 + 0.65 * pulse) * clamp((1.0 + field_drive) / 4.8, 0.0, 1.2);
+        float push_scale = 0.0;
+        float pull_scale = 0.0;
+
+        if ((mat_type == 59u || mat_type == 63u || mat_type == 64u || mat_type == 65u || mat_type == 66u) &&
+            support_edge > 1e-5 && length(edge_dir) > 0.0) {
+            push_scale = 5.8;
+            if (mat_type == 63u) push_scale = 7.6;
+            else if (mat_type == 64u) push_scale = 6.6;
+            else if (mat_type == 65u) push_scale = 7.1;
+            else if (mat_type == 66u) {
+                float cool_gate = 1.0 - smoothstep(340.0, 395.0, temp);
+                push_scale = mix(2.2, 4.8, cool_gate);
+            }
+            new_vel += edge_dir * (frontier_push * push_scale * (0.32 * bio_coupling + 0.28 * automata_coupling)) * u_dt;
+        }
+        if ((mat_type == 59u || mat_type == 63u || mat_type == 64u || mat_type == 65u || mat_type == 66u) &&
+            lead_pull > 1e-5 && length(field_dir) > 0.0) {
+            pull_scale = 7.6;
+            if (mat_type == 63u) pull_scale = 9.0;
+            else if (mat_type == 64u) pull_scale = 8.2;
+            else if (mat_type == 65u) pull_scale = 8.8;
+            else if (mat_type == 66u) {
+                float cool_gate = 1.0 - smoothstep(340.0, 395.0, temp);
+                pull_scale = mix(2.6, 5.4, cool_gate);
+            }
+            new_vel += field_dir * (lead_pull * pull_scale * (0.26 * bio_coupling + 0.24 * automata_coupling)) * u_dt;
+        }
+
+        if ((mat_type == 59u || mat_type == 63u || mat_type == 64u || mat_type == 65u || mat_type == 66u) &&
+            (push_scale > 0.0 || pull_scale > 0.0)) {
+            bio_debug_force =
+                edge_dir * (frontier_push * push_scale * (0.32 * bio_coupling)) +
+                field_dir * (lead_pull * pull_scale * (0.26 * bio_coupling));
+            automata_debug_force =
+                edge_dir * (frontier_push * push_scale * (0.28 * automata_coupling)) +
+                field_dir * (lead_pull * pull_scale * (0.24 * automata_coupling)) +
+                ((automata_grad_mag > 1e-6) ? (automata_grad / automata_grad_mag) : vec2(0.0)) *
+                (colony_drive * (0.20 * automata_coupling));
+        }
+
+        if (mat_type == 59u) {
+            float split = damage[idx];
+            float heal = phase_data[idx];
+            float pore = Jp_data[idx];
+            heal = clamp(max(heal, max(max(bio_source * (0.72 + 0.28 * bio_coupling), bio_b * (0.52 + 0.24 * bio_coupling)), automata * (0.54 + 0.22 * automata_coupling))) - 0.012 * u_dt, 0.0, 1.0);
+            split = clamp(split + max(bio_b - 0.68, 0.0) * 0.34 * bio_coupling * u_dt + max(automata - 0.76, 0.0) * 0.24 * automata_coupling * u_dt - bio_a * 0.025 * u_dt, 0.0, 1.0);
+            pore = clamp(pore + combined_growth * 0.46 * u_dt - bio_a * 0.08 * u_dt, 0.0, 1.0);
+            new_vel += field_dir * (3.2 * field_drive * (0.35 + 0.65 * heal)) * u_dt;
+            damage[idx] = split;
+            phase_data[idx] = heal;
+            Jp_data[idx] = pore;
+        } else if (mat_type == 33u) {
+            float wilt = damage[idx];
+            float spores = phase_data[idx];
+            float crack = Jp_data[idx];
+            spores = clamp(max(spores, max(bio_b * (0.58 + 0.24 * bio_coupling), automata * (0.52 + 0.18 * automata_coupling))) - 0.010 * u_dt, 0.0, 1.0);
+            wilt = clamp(wilt - bio_b * 0.03 * u_dt + max(temp - 420.0, 0.0) * 0.00008 * u_dt, 0.0, 1.0);
+            crack = clamp(crack + max(bio_b - 0.74, 0.0) * 0.28 * bio_coupling * u_dt + max(automata - 0.72, 0.0) * 0.16 * automata_coupling * u_dt, 0.0, 1.0);
+            new_vel += field_dir * (2.4 * field_drive * (0.28 + 0.72 * spores)) * u_dt;
+            new_vel.y += combined_growth * 0.30 * u_dt;
+            damage[idx] = wilt;
+            phase_data[idx] = spores;
+            Jp_data[idx] = crack;
+        } else if (mat_type == 34u) {
+            float dry = damage[idx];
+            float pore = phase_data[idx];
+            float tear = Jp_data[idx];
+            dry = clamp(dry + bio_b * 0.06 * bio_coupling * u_dt + max(automata - 0.60, 0.0) * 0.03 * automata_coupling * u_dt, 0.0, 1.0);
+            pore = clamp(max(pore, combined_growth * (0.48 + 0.12 * automata_coupling)) - 0.010 * u_dt, 0.0, 1.0);
+            tear = clamp(tear + max(bio_b - 0.72, 0.0) * 0.20 * bio_coupling * u_dt + max(automata - 0.78, 0.0) * 0.14 * automata_coupling * u_dt, 0.0, 1.0);
+            damage[idx] = dry;
+            phase_data[idx] = pore;
+            Jp_data[idx] = tear;
+        } else if (mat_type == 32u) {
+            float brown = damage[idx];
+            float dry = phase_data[idx];
+            float blister = Jp_data[idx];
+            brown = clamp(brown + max(bio_b - 0.42, 0.0) * 0.16 * bio_coupling * u_dt + max(automata - 0.64, 0.0) * 0.08 * automata_coupling * u_dt, 0.0, 1.0);
+            dry = clamp(dry + combined_growth * 0.10 * u_dt, 0.0, 1.0);
+            blister = clamp(max(blister, max(bio_b * 0.55, automata * 0.42)) - 0.008 * u_dt, 0.0, 1.0);
+            damage[idx] = brown;
+            phase_data[idx] = dry;
+            Jp_data[idx] = blister;
+        } else if (mat_type == 63u) {
+            float morph_growth = damage[idx];
+            float fold = phase_data[idx];
+            float scar = Jp_data[idx];
+            float burn_kill = smoothstep(430.0, 760.0, temp);
+            morph_growth = clamp(max(morph_growth, max(max(scout_growth * (0.78 + 0.30 * bio_coupling),
+                                                       chemical_growth * (0.64 + 0.22 * bio_coupling)),
+                                                       colony_fill * (0.84 + 0.34 * automata_coupling))) - (0.004 + 0.090 * burn_kill) * u_dt, 0.0, 1.0);
+            fold = clamp(fold + max(bio_b - 0.46, 0.0) * 0.22 * bio_coupling * u_dt +
+                               max(automata - 0.50, 0.0) * 0.44 * automata_coupling * u_dt +
+                               field_drive * 0.14 * u_dt - (bio_a * 0.010 + 0.16 * burn_kill) * u_dt, 0.0, 1.0);
+            scar = clamp(max(scar, burn_kill * (0.35 + 0.50 * (1.0 - morph_growth))) +
+                               max(bio_b - 0.80, 0.0) * 0.10 * bio_coupling * u_dt +
+                               max(automata - 0.82, 0.0) * 0.12 * automata_coupling * u_dt - 0.006 * u_dt, 0.0, 1.0);
+            new_vel += field_dir * (3.3 * field_drive * (0.28 + 0.72 * morph_growth) * (1.0 - 0.65 * burn_kill)) * u_dt;
+            new_vel.y += morph_growth * (0.12 * bio_coupling + 0.30 * automata_coupling) * (1.0 - 0.60 * burn_kill) * u_dt;
+            damage[idx] = morph_growth;
+            phase_data[idx] = fold;
+            Jp_data[idx] = scar;
+        } else if (mat_type == 64u) {
+            float colonize = damage[idx];
+            float lignify = phase_data[idx];
+            float branch = Jp_data[idx];
+            float burn_kill = smoothstep(430.0, 760.0, temp);
+            colonize = clamp(max(colonize, max(max(scout_growth * (0.74 + 0.32 * bio_coupling),
+                                               chemical_growth * (0.54 + 0.24 * bio_coupling)),
+                                               colony_fill * (0.72 + 0.32 * automata_coupling))) - (0.003 + 0.075 * burn_kill) * u_dt, 0.0, 1.0);
+            lignify = clamp(lignify + max(colonize - 0.18, 0.0) * 0.12 * u_dt + max(temp - 325.0, 0.0) * 0.00016 * u_dt - 0.10 * burn_kill * u_dt, 0.0, 1.0);
+            branch = clamp(max(branch, burn_kill * (0.28 + 0.42 * (1.0 - colonize))) + bio_drive * 0.22 * bio_coupling * u_dt +
+                                   colony_drive * 0.34 * automata_coupling * u_dt +
+                                   max(automata - 0.64, 0.0) * 0.14 * automata_coupling * u_dt - 0.004 * u_dt, 0.0, 1.0);
+            new_vel += field_dir * (3.4 * field_drive * (0.22 + 0.58 * colonize) * (1.0 - 0.58 * burn_kill)) * u_dt;
+            new_vel += vec2(0.0, 0.12) * colonize * (1.0 - 0.55 * burn_kill) * u_dt;
+            damage[idx] = colonize;
+            phase_data[idx] = lignify;
+            Jp_data[idx] = branch;
+        } else if (mat_type == 65u) {
+            float bud = damage[idx];
+            float seal = phase_data[idx];
+            float frill = Jp_data[idx];
+            float burn_kill = smoothstep(430.0, 760.0, temp);
+            bud = clamp(max(bud, max(max(bio_source * (0.88 + 0.26 * bio_coupling),
+                                     bio_b * (0.56 + 0.18 * bio_coupling)),
+                                     automata * (0.90 + 0.34 * automata_coupling))) - (0.005 + 0.085 * burn_kill) * u_dt, 0.0, 1.0);
+            seal = clamp(seal + chemical_growth * 0.10 * bio_coupling * u_dt +
+                               max(automata - 0.40, 0.0) * 0.24 * automata_coupling * u_dt -
+                               (max(bio_b - 0.82, 0.0) * 0.03 + 0.12 * burn_kill) * u_dt, 0.0, 1.0);
+            frill = clamp(max(frill, burn_kill * (0.30 + 0.46 * (1.0 - bud))) + max(bio_b - 0.62, 0.0) * 0.18 * bio_coupling * u_dt +
+                                max(automata - 0.52, 0.0) * 0.34 * automata_coupling * u_dt +
+                                field_drive * 0.12 * u_dt - 0.004 * u_dt, 0.0, 1.0);
+            new_vel += field_dir * (3.5 * field_drive * (0.30 + 0.70 * bud) * (1.0 - 0.62 * burn_kill)) * u_dt;
+            new_vel.y += bud * (0.08 * bio_coupling + 0.24 * automata_coupling) * (1.0 - 0.60 * burn_kill) * u_dt;
+            damage[idx] = bud;
+            phase_data[idx] = seal;
+            Jp_data[idx] = frill;
+        } else if (mat_type == 66u) {
+            float regrow = damage[idx];
+            float ash = phase_data[idx];
+            float crumble = Jp_data[idx];
+            float burn_kill = smoothstep(430.0, 790.0, temp);
+            float ash_memory = smoothstep(0.08, 0.92, ash);
+            float cool_regrow = 1.0 - smoothstep(340.0, 395.0, temp);
+            float live_front = max(max(scout_growth * (0.92 + 0.32 * bio_coupling),
+                                       chemical_growth * (0.78 + 0.24 * bio_coupling)),
+                                   colony_fill * (0.90 + 0.34 * automata_coupling));
+            float dormant_wake = ash_memory * cool_regrow * regrow_front_gain *
+                                 (0.12 + 0.52 * support +
+                                  0.22 * max(max(bio_source, bio_b), automata));
+            float scaffold_front = max(
+                support * max(max(bio_source * 1.60, bio_b * 1.05), automata * 1.22) *
+                    (0.28 + 0.72 * ash_memory) * cool_regrow * regrow_front_gain,
+                dormant_wake);
+            float growth_front = max(live_front, scaffold_front);
+            float front_gate = smoothstep(0.003, 0.055, growth_front);
+            float rebuild = max(growth_front, dormant_wake) * front_gate * cool_regrow *
+                            (0.14 + 0.86 * ash_memory);
+            float recovery = smoothstep(0.26, 0.84, regrow) * cool_regrow;
+
+            ash = clamp(max(ash, burn_kill * (0.62 + 0.28 * (1.0 - regrow))) +
+                        burn_kill * 0.70 * u_dt -
+                        (0.010 + 0.34 * recovery * regrow_rate * (0.28 + 0.72 * growth_front) +
+                         0.080 * front_gate * cool_regrow +
+                         0.18 * rebuild * min(regrow_rate, 12.0)) * u_dt,
+                       0.0, 1.0);
+
+            float regrow_target = max(growth_front * front_gate * cool_regrow *
+                                      (0.36 + 1.42 * ash_memory) * (1.0 - burn_kill * 0.97),
+                                      dormant_wake * (0.30 + 0.90 * ash_memory));
+            regrow += (regrow_target - regrow) * (0.34 + 1.26 * regrow_rate) * u_dt;
+            regrow += rebuild * (0.06 + 0.12 * min(regrow_rate, 12.0)) * u_dt;
+            regrow -= (0.006 + 0.018 * ash * (1.0 - growth_front) + 0.24 * burn_kill +
+                       0.040 * (1.0 - cool_regrow) * ash_memory) * u_dt;
+            regrow = clamp(regrow, 0.0, 1.0);
+
+            crumble = clamp(max(crumble, burn_kill * (0.04 + 0.12 * ash)) -
+                            recovery * 0.30 * regrow_rate * u_dt,
+                            0.0, 1.0);
+
+            new_vel += field_dir * (3.2 * field_drive * (0.10 + 0.38 * ash_memory) *
+                                    (0.12 + 0.96 * regrow) * regrow_rate * cool_regrow *
+                                    (1.0 - 0.55 * burn_kill)) * u_dt;
+            new_vel.y += recovery * (0.04 * bio_coupling + 0.08 * automata_coupling) *
+                         regrow_rate * u_dt;
+
+            damage[idx] = regrow;
+            phase_data[idx] = ash;
+            Jp_data[idx] = crumble;
+        }
+    }
+
+    // --- Visualization (skip if keeping batch colors, but still apply highlight) ---
+    if (u_keep_colors == 1) {
+        if (p >= u_highlight_start && p < u_highlight_end) {
+            vec4 cur = colors[p];
+            float pulse = sin(u_time * 6.0) * 0.3 + 0.7;
+            vec3 gold = vec3(1.0, 0.85, 0.3);
+            cur.rgb = mix(cur.rgb, gold, 0.5 * pulse);
+            cur.rgb += gold * 0.4 * pulse;
+            colors[p] = cur;
+        } else {
+            vec4 cur = colors[p];
+            if (mat_type == 4u) {
+                cur.rgb = mix(cur.rgb, heat_color((temp - 220.0) / 650.0), 0.35);
+            } else if (mat_type == 5u) {
+                float d = damage[idx];
+                cur.rgb = mix(cur.rgb, vec3(0.2, 0.04, 0.02), d * 0.65);
+            } else if (mat_type == 6u) {
+                float phi = phase_data[idx];
+                vec3 phase_c = (phi < 0.5)
+                    ? mix(vec3(0.3,0.5,0.9), vec3(0.2,0.8,0.9), phi * 2.0)
+                    : mix(vec3(0.2,0.8,0.9), vec3(0.15,0.4,0.8), (phi - 0.5) * 2.0);
+                cur.rgb = mix(cur.rgb, phase_c, 0.55);
+            } else if (mat_type == 7u) {
+                float burn = damage[idx];
+                vec3 burn_c;
+                if (burn < 0.3) burn_c = mix(vec3(0.5,0.3,0.1), vec3(1.0,0.5,0.1), burn/0.3);
+                else if (burn < 0.7) burn_c = mix(vec3(1.0,0.5,0.1), vec3(1.0,0.9,0.3), (burn-0.3)/0.4);
+                else burn_c = mix(vec3(1.0,0.9,0.3), vec3(0.3,0.3,0.3), (burn-0.7)/0.3);
+                cur.rgb = mix(cur.rgb, burn_c, 0.7);
+            } else if (mat_type == 8u) {
+                float glow = clamp((temp - 350.0) / 600.0, 0.0, 1.0);
+                cur.rgb += vec3(0.45, 0.25, 0.08) * glow;
+            } else if (mat_type == 9u) {
+                float cured = damage[idx];
+                cur.rgb = mix(cur.rgb, vec3(0.25,0.12,0.05), cured * 0.7);
+            } else if (mat_type == 10u) {
+                float crack = Jp_data[idx];
+                cur.rgb = mix(cur.rgb, vec3(0.12, 0.05, 0.02), crack * 0.7);
+            } else if (mat_type == 12u) {
+                float d = damage[idx];
+                cur.rgb = mix(cur.rgb, vec3(0.16, 0.05, 0.03), d * 0.55);
+            } else if (mat_type == 13u) {
+                float d = damage[idx];
+                cur.rgb = mix(cur.rgb, vec3(0.2, 0.1, 0.06), d * 0.4);
+            } else if (mat_type == 14u) {
+                float soft = phase_data[idx];
+                float crack = damage[idx];
+                vec3 hot_glass = mix(vec3(0.6, 0.75, 0.95), vec3(1.0, 0.55, 0.18), soft);
+                cur.rgb = mix(cur.rgb, hot_glass, 0.55);
+                cur.rgb = mix(cur.rgb, vec3(0.08, 0.02, 0.01), crack * 0.4);
+            } else if (mat_type == 15u) {
+                float cured = damage[idx];
+                float crack = Jp_data[idx];
+                float bloom = phase_data[idx];
+                vec3 bloom_c = mix(vec3(0.86, 0.68, 0.48), vec3(0.72, 0.26, 0.08), cured);
+                bloom_c += vec3(0.15, 0.04, 0.0) * bloom;
+                cur.rgb = mix(cur.rgb, bloom_c, 0.65);
+                cur.rgb = mix(cur.rgb, vec3(0.08, 0.03, 0.01), crack * 0.55);
+            } else if (mat_type == 16u) {
+                float burn = damage[idx];
+                vec3 oil_c = mix(vec3(0.78, 0.62, 0.18), vec3(1.0, 0.45, 0.08), burn);
+                cur.rgb = mix(cur.rgb, oil_c, 0.7);
+            } else if (mat_type == 17u) {
+                float pore = damage[idx];
+                float soft = phase_data[idx];
+                vec3 foam_c = mix(vec3(0.72, 0.7, 0.6), vec3(0.95, 0.82, 0.52), soft);
+                foam_c = mix(foam_c, vec3(0.3, 0.22, 0.12), pore * 0.5);
+                cur.rgb = mix(cur.rgb, foam_c, 0.65);
+            } else if (mat_type == 18u) {
+                float cured = damage[idx];
+                float crack = Jp_data[idx];
+                float split = phase_data[idx];
+                vec3 split_c = mix(vec3(0.84, 0.68, 0.42), vec3(0.92, 0.44, 0.14), cured);
+                split_c += vec3(0.15, 0.05, 0.0) * split;
+                cur.rgb = mix(cur.rgb, split_c, 0.72);
+                cur.rgb = mix(cur.rgb, vec3(0.08, 0.03, 0.01), crack * 0.6);
+            } else if (mat_type == 19u) {
+                float baked = damage[idx];
+                float gas = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 dough_c = mix(vec3(0.86, 0.74, 0.50), vec3(0.58, 0.33, 0.12), baked);
+                dough_c += vec3(0.14, 0.07, 0.01) * gas;
+                cur.rgb = mix(cur.rgb, dough_c, 0.68);
+                cur.rgb = mix(cur.rgb, vec3(0.16, 0.07, 0.03), tear * 0.45);
+            } else if (mat_type == 20u) {
+                float cured = damage[idx];
+                float gas = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 puff_c = mix(vec3(0.82, 0.66, 0.48), vec3(0.72, 0.30, 0.14), cured);
+                puff_c += vec3(0.12, 0.05, 0.0) * gas;
+                cur.rgb = mix(cur.rgb, puff_c, 0.72);
+                cur.rgb = mix(cur.rgb, vec3(0.08, 0.03, 0.01), crack * 0.58);
+            } else if (mat_type == 21u) {
+                float fuse = damage[idx];
+                float gas = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 shell_c = mix(vec3(0.82, 0.16, 0.12), vec3(1.0, 0.56, 0.12), fuse);
+                shell_c += vec3(0.25, 0.08, 0.0) * gas;
+                cur.rgb = mix(cur.rgb, shell_c, 0.75);
+                cur.rgb = mix(cur.rgb, vec3(0.12, 0.03, 0.02), crack * 0.65);
+            } else if (mat_type == 22u) {
+                float cured = damage[idx];
+                float glaze = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 glaze_c = mix(vec3(0.90, 0.78, 0.64), vec3(0.72, 0.36, 0.18), cured);
+                glaze_c = mix(glaze_c, vec3(0.98, 0.86, 0.48), glaze * 0.6);
+                cur.rgb = mix(cur.rgb, glaze_c, 0.72);
+                cur.rgb = mix(cur.rgb, vec3(0.10, 0.04, 0.02), crack * 0.58);
+            } else if (mat_type == 23u) {
+                float crust = damage[idx];
+                float gas = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 loaf_c = mix(vec3(0.90, 0.76, 0.52), vec3(0.56, 0.30, 0.10), crust);
+                loaf_c += vec3(0.14, 0.07, 0.01) * gas;
+                cur.rgb = mix(cur.rgb, loaf_c, 0.70);
+                cur.rgb = mix(cur.rgb, vec3(0.16, 0.07, 0.03), tear * 0.48);
+            } else if (mat_type == 24u) {
+                float hard = damage[idx];
+                float hot_mem = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 metal_c = mix(vec3(0.62, 0.64, 0.70), vec3(0.96, 0.46, 0.12), clamp((temp - 360.0) / 520.0, 0.0, 1.0));
+                metal_c = mix(metal_c, vec3(0.78, 0.80, 0.88), hard * 0.35);
+                metal_c += vec3(0.08, 0.04, 0.0) * hot_mem;
+                cur.rgb = mix(cur.rgb, metal_c, 0.72);
+                cur.rgb = mix(cur.rgb, vec3(0.12, 0.03, 0.02), crack * 0.42);
+            } else if (mat_type == 25u) {
+                float charred = damage[idx];
+                float gas = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 resin_c = mix(vec3(0.56, 0.20, 0.12), vec3(0.16, 0.08, 0.06), charred);
+                resin_c += vec3(0.28, 0.10, 0.0) * gas;
+                cur.rgb = mix(cur.rgb, resin_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.10, 0.03, 0.02), crack * 0.65);
+            } else if (mat_type == 62u) {
+                float cooked = damage[idx];
+                float gas = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 shell_c = mix(vec3(0.70, 0.16, 0.10), vec3(1.0, 0.62, 0.20), cooked);
+                shell_c += vec3(0.34, 0.12, 0.02) * gas;
+                cur.rgb = mix(cur.rgb, shell_c, 0.82);
+                cur.rgb = mix(cur.rgb, vec3(0.12, 0.03, 0.02), crack * 0.72);
+            } else if (mat_type == 26u) {
+                float cured = damage[idx];
+                float glaze = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 drip_c = mix(vec3(0.96, 0.82, 0.62), vec3(0.98, 0.70, 0.30), glaze);
+                drip_c = mix(drip_c, vec3(0.68, 0.34, 0.16), cured * 0.55);
+                cur.rgb = mix(cur.rgb, drip_c, 0.74);
+                cur.rgb = mix(cur.rgb, vec3(0.10, 0.04, 0.02), crack * 0.48);
+            } else if (mat_type == 27u) {
+                float skin = damage[idx];
+                float gas = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 bun_c = mix(vec3(0.96, 0.84, 0.58), vec3(0.86, 0.60, 0.24), skin);
+                bun_c += vec3(0.12, 0.06, 0.01) * gas;
+                cur.rgb = mix(cur.rgb, bun_c, 0.72);
+                cur.rgb = mix(cur.rgb, vec3(0.16, 0.08, 0.03), tear * 0.38);
+            } else if (mat_type == 28u) {
+                float stringy = damage[idx];
+                float soft = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 fil_c = mix(vec3(0.74, 0.86, 0.98), vec3(1.0, 0.64, 0.18), soft);
+                fil_c += vec3(0.18, 0.10, 0.02) * stringy;
+                cur.rgb = mix(cur.rgb, fil_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.10, 0.03, 0.02), tear * 0.42);
+            } else if (mat_type == 29u) {
+                float stringy = damage[idx];
+                float soft = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 cheese_c = mix(vec3(0.98, 0.88, 0.44), vec3(0.92, 0.60, 0.16), soft);
+                cheese_c += vec3(0.14, 0.08, 0.01) * stringy;
+                cur.rgb = mix(cur.rgb, cheese_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.22, 0.10, 0.04), tear * 0.24);
+            } else if (mat_type == 30u) {
+                float recover = damage[idx];
+                float soft = phase_data[idx];
+                vec3 wax_c = mix(vec3(0.92, 0.76, 0.42), vec3(1.0, 0.48, 0.16), soft);
+                wax_c = mix(wax_c, vec3(0.96, 0.88, 0.66), recover * 0.35);
+                cur.rgb = mix(cur.rgb, wax_c, 0.74);
+            } else if (mat_type == 31u) {
+                // Ferrofluid is now stateless (Tait EOS, no chain/spike
+                // bookkeeping) so we just use the bright-orange spawn color
+                // modulated slightly by local field strength for
+                // visual feedback of magnetic activity.
+                vec4 mf = sample_magnetic_field(pos);
+                float h_mag = (u_use_real_magnetics != 0) ? clamp(mf.z * 0.05, 0.0, 1.0) : 0.0;
+                vec3 ferro_c = mix(vec3(0.95, 0.55, 0.15), vec3(1.0, 0.80, 0.30), h_mag);
+                cur.rgb = mix(cur.rgb, ferro_c, 0.85);
+            } else if (mat_type == 57u) {
+                vec4 mf = sample_magnetic_field(pos);
+                vec3 iron_c = mix(vec3(0.56, 0.60, 0.66), vec3(0.72, 0.78, 0.86), clamp(mf.z * 0.03, 0.0, 1.0));
+                cur.rgb = mix(cur.rgb, iron_c, 0.76);
+            } else if (mat_type == 58u) {
+                vec4 mf = sample_magnetic_field(pos);
+                vec3 rubber_c = mix(vec3(0.44, 0.48, 0.56), vec3(0.66, 0.74, 0.88), clamp(mf.z * 0.025, 0.0, 1.0));
+                cur.rgb = mix(cur.rgb, rubber_c, 0.74);
+            } else if (mat_type == 59u) {
+                float split = damage[idx];
+                float heal = phase_data[idx];
+                float pore = Jp_data[idx];
+                vec3 goo_c = mix(vec3(0.18, 0.78, 0.58), vec3(0.10, 0.40, 0.26), split);
+                goo_c = mix(goo_c, vec3(0.72, 0.96, 0.84), heal * 0.28);
+                goo_c = mix(goo_c, vec3(0.08, 0.18, 0.12), pore * 0.24);
+                cur.rgb = mix(cur.rgb, goo_c, 0.78);
+            } else if (mat_type == 60u) {
+                float jam = damage[idx];
+                float yielded = phase_data[idx];
+                float compact = Jp_data[idx];
+                vec3 oob_c = mix(vec3(0.76, 0.68, 0.46), vec3(0.94, 0.86, 0.62), jam);
+                oob_c = mix(oob_c, vec3(0.52, 0.42, 0.26), yielded * 0.38);
+                oob_c = mix(oob_c, vec3(0.30, 0.24, 0.14), compact * 0.16);
+                cur.rgb = mix(cur.rgb, oob_c, 0.78);
+            } else if (mat_type == 61u) {
+                float hard = damage[idx];
+                float memory = phase_data[idx];
+                float bruise = Jp_data[idx];
+                vec3 gel_c = mix(vec3(0.66, 0.46, 0.88), vec3(0.86, 0.74, 0.98), hard);
+                gel_c = mix(gel_c, vec3(0.92, 0.86, 1.0), memory * 0.22);
+                gel_c = mix(gel_c, vec3(0.28, 0.10, 0.24), bruise * 0.26);
+                cur.rgb = mix(cur.rgb, gel_c, 0.78);
+            } else if (mat_type == 63u) {
+                float growth = damage[idx];
+                float fold = phase_data[idx];
+                float scar = Jp_data[idx];
+                float scorch = clamp(max(smoothstep(430.0, 760.0, temp_here), scar * 1.12) * (0.82 + 0.18 * (1.0 - growth)), 0.0, 1.0);
+                vec3 tissue_c = mix(vec3(0.30, 0.76, 0.56), vec3(0.10, 0.10, 0.09), scorch);
+                tissue_c = mix(tissue_c, vec3(0.82, 0.96, 0.68), growth * 0.18);
+                tissue_c = mix(tissue_c, vec3(0.18, 0.44, 0.30), fold * 0.34);
+                tissue_c = mix(tissue_c, vec3(0.14, 0.12, 0.10), clamp(scar * 0.44 + scorch * 0.42, 0.0, 1.0));
+                cur.rgb = mix(cur.rgb, tissue_c, 0.80);
+            } else if (mat_type == 64u) {
+                float colonize = damage[idx];
+                float lignify = phase_data[idx];
+                float branch = Jp_data[idx];
+                float scorch = clamp(max(smoothstep(430.0, 760.0, temp_here), branch * 0.74) * (0.86 + 0.14 * (1.0 - colonize)), 0.0, 1.0);
+                vec3 root_c = mix(vec3(0.40, 0.72, 0.30), vec3(0.12, 0.10, 0.08), scorch);
+                root_c = mix(root_c, vec3(0.72, 0.88, 0.46), colonize * 0.14);
+                root_c = mix(root_c, vec3(0.34, 0.22, 0.12), lignify * 0.38);
+                root_c = mix(root_c, vec3(0.22, 0.44, 0.18), branch * 0.12);
+                cur.rgb = mix(cur.rgb, root_c, 0.80);
+            } else if (mat_type == 65u) {
+                float bud = damage[idx];
+                float seal = phase_data[idx];
+                float frill = Jp_data[idx];
+                float scorch = clamp(max(smoothstep(430.0, 760.0, temp_here), frill * 0.70) * (0.88 + 0.12 * (1.0 - bud)), 0.0, 1.0);
+                vec3 sheet_c = mix(vec3(0.92, 0.60, 0.70), vec3(0.12, 0.11, 0.12), scorch);
+                sheet_c = mix(sheet_c, vec3(0.98, 0.82, 0.88), bud * 0.16);
+                sheet_c = mix(sheet_c, vec3(0.72, 0.42, 0.52), seal * 0.24);
+                sheet_c = mix(sheet_c, vec3(0.42, 0.20, 0.28), clamp(frill * 0.24 + scorch * 0.24, 0.0, 1.0));
+                cur.rgb = mix(cur.rgb, sheet_c, 0.80);
+            } else if (mat_type == 66u) {
+                float regrow = damage[idx];
+                float ash = phase_data[idx];
+                float crumble = Jp_data[idx];
+                vec3 phoenix_c = ash_regrowth_state_color(regrow, ash, crumble, temp_here);
+                cur.rgb = mix(cur.rgb, phoenix_c, 0.88);
+            } else if (mat_type == 32u) {
+                float brown = damage[idx];
+                float dry = phase_data[idx];
+                float blister = Jp_data[idx];
+                vec3 cook_c = mix(vec3(0.96, 0.84, 0.54), vec3(0.42, 0.20, 0.08), brown);
+                cook_c = mix(cook_c, vec3(0.84, 0.66, 0.34), dry * 0.25);
+                cur.rgb = mix(cur.rgb, cook_c, 0.74);
+                cur.rgb = mix(cur.rgb, vec3(0.22, 0.10, 0.05), blister * 0.24);
+            } else if (mat_type == 33u) {
+                float wilt = damage[idx];
+                float spores = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 mush_c = mix(vec3(0.72, 0.68, 0.52), vec3(0.46, 0.34, 0.20), wilt);
+                mush_c = mix(mush_c, vec3(0.86, 0.80, 0.66), spores * 0.35);
+                cur.rgb = mix(cur.rgb, mush_c, 0.74);
+                cur.rgb = mix(cur.rgb, vec3(0.16, 0.10, 0.08), crack * 0.30);
+            } else if (mat_type == 34u) {
+                float dry = damage[idx];
+                float pore = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 crumb_c = mix(vec3(0.95, 0.80, 0.54), vec3(0.58, 0.34, 0.14), dry);
+                crumb_c = mix(crumb_c, vec3(0.98, 0.90, 0.72), pore * 0.30);
+                cur.rgb = mix(cur.rgb, crumb_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.22, 0.10, 0.04), tear * 0.34);
+            } else if (mat_type == 35u) {
+                float sinter = damage[idx];
+                float pore = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 bisque_c = mix(vec3(0.90, 0.78, 0.68), vec3(0.74, 0.44, 0.24), sinter);
+                bisque_c = mix(bisque_c, vec3(0.96, 0.92, 0.82), pore * 0.24);
+                cur.rgb = mix(cur.rgb, bisque_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.14, 0.06, 0.03), crack * 0.56);
+            } else if (mat_type == 36u) {
+                float dry = damage[idx];
+                float weak = phase_data[idx];
+                float tear = Jp_data[idx];
+                vec3 skin_c = mix(vec3(0.96, 0.88, 0.68), vec3(0.82, 0.56, 0.24), dry);
+                skin_c = mix(skin_c, vec3(0.98, 0.94, 0.84), weak * 0.16);
+                cur.rgb = mix(cur.rgb, skin_c, 0.74);
+                cur.rgb = mix(cur.rgb, vec3(0.20, 0.08, 0.03), tear * 0.48);
+            } else if (mat_type == 37u) {
+                float bake = damage[idx];
+                float steam = phase_data[idx];
+                float delam = Jp_data[idx];
+                vec3 pastry_c = mix(vec3(0.98, 0.86, 0.58), vec3(0.62, 0.34, 0.12), bake);
+                pastry_c = mix(pastry_c, vec3(1.00, 0.94, 0.78), steam * 0.20);
+                cur.rgb = mix(cur.rgb, pastry_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.30, 0.14, 0.05), delam * 0.42);
+            } else if (mat_type == 38u) {
+                float fired = damage[idx];
+                float shrink = phase_data[idx];
+                float craze = Jp_data[idx];
+                vec3 stone_c = mix(vec3(0.72, 0.62, 0.56), vec3(0.52, 0.30, 0.18), fired);
+                stone_c = mix(stone_c, vec3(0.86, 0.80, 0.74), shrink * 0.10);
+                cur.rgb = mix(cur.rgb, stone_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.10, 0.04, 0.03), craze * 0.50);
+            } else if (mat_type == 39u) {
+                float bend = damage[idx];
+                vec3 ortho_c = mix(vec3(0.78, 0.56, 0.26), vec3(0.58, 0.34, 0.12), bend);
+                cur.rgb = mix(cur.rgb, ortho_c, 0.74);
+            } else if (mat_type == 40u) {
+                float cure = damage[idx];
+                float cross = phase_data[idx];
+                float crack = Jp_data[idx];
+                vec3 ortho_t = mix(vec3(0.86, 0.64, 0.34), vec3(0.48, 0.26, 0.10), cure);
+                ortho_t = mix(ortho_t, vec3(0.96, 0.90, 0.80), cross * 0.12);
+                cur.rgb = mix(cur.rgb, ortho_t, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.16, 0.06, 0.03), crack * 0.50);
+            } else if (mat_type == 41u) {
+                float dry = damage[idx];
+                float moisture = phase_data[idx];
+                float vent = Jp_data[idx];
+                vec3 vent_c = mix(vec3(0.97, 0.82, 0.58), vec3(0.58, 0.34, 0.14), dry);
+                vent_c = mix(vent_c, vec3(0.98, 0.92, 0.76), moisture * 0.20);
+                cur.rgb = mix(cur.rgb, vent_c, 0.76);
+                cur.rgb = mix(cur.rgb, vec3(0.22, 0.10, 0.04), vent * 0.44);
+            } else if (mat_type == 42u) {
+                float fired = damage[idx];
+                float shrink = phase_data[idx];
+                float craze = Jp_data[idx];
+                vec3 vit_c = mix(vec3(0.74, 0.66, 0.60), vec3(0.50, 0.30, 0.20), fired);
+                vit_c = mix(vit_c, vec3(0.92, 0.86, 0.80), shrink * 0.12);
+                cur.rgb = mix(cur.rgb, vit_c, 0.78);
+                cur.rgb = mix(cur.rgb, vec3(0.10, 0.04, 0.03), craze * 0.46);
+            } else if (mat_type == 43u) {
+                float glaze = damage[idx];
+                float blister = phase_data[idx];
+                float vent = Jp_data[idx];
+                vec3 glaze_c = mix(vec3(0.98, 0.84, 0.64), vec3(0.78, 0.42, 0.20), glaze);
+                glaze_c = mix(glaze_c, vec3(1.00, 0.94, 0.82), blister * 0.18);
+                cur.rgb = mix(cur.rgb, glaze_c, 0.78);
+                cur.rgb = mix(cur.rgb, vec3(0.18, 0.08, 0.04), vent * 0.38);
+            } else if (mat_type == 44u) {
+                float dry = damage[idx];
+                float moisture = phase_data[idx];
+                float pore = Jp_data[idx];
+                vec3 crumb_c = mix(vec3(0.99, 0.84, 0.62), vec3(0.60, 0.34, 0.14), dry);
+                crumb_c = mix(crumb_c, vec3(1.00, 0.95, 0.82), pore * 0.24);
+                crumb_c = mix(crumb_c, vec3(0.94, 0.82, 0.66), moisture * 0.12);
+                cur.rgb = mix(cur.rgb, crumb_c, 0.80);
+                cur.rgb = mix(cur.rgb, vec3(0.20, 0.08, 0.03), pore * 0.22);
+            } else if (mat_type == 45u) {
+                float fired = damage[idx];
+                float shrink = phase_data[idx];
+                float lock = Jp_data[idx];
+                vec3 sinter_c = mix(vec3(0.68, 0.60, 0.56), vec3(0.46, 0.28, 0.18), fired);
+                sinter_c = mix(sinter_c, vec3(0.86, 0.82, 0.78), shrink * 0.10);
+                sinter_c = mix(sinter_c, vec3(0.94, 0.90, 0.84), lock * 0.08);
+                cur.rgb = mix(cur.rgb, sinter_c, 0.80);
+                cur.rgb = mix(cur.rgb, vec3(0.08, 0.03, 0.02), smoothstep(0.70, 1.0, lock) * 0.24);
+            } else if (mat_type == 46u) {
+                float binder = damage[idx];
+                float moisture = phase_data[idx];
+                float pore = Jp_data[idx];
+                vec3 crumb_c = mix(vec3(0.97, 0.84, 0.60), vec3(0.58, 0.34, 0.14), binder);
+                crumb_c = mix(crumb_c, vec3(1.00, 0.94, 0.80), pore * 0.22);
+                crumb_c = mix(crumb_c, vec3(0.94, 0.86, 0.72), moisture * 0.16);
+                cur.rgb = mix(cur.rgb, crumb_c, 0.80);
+                cur.rgb = mix(cur.rgb, vec3(0.20, 0.08, 0.03), pore * 0.18);
+            } else if (mat_type == 47u) {
+                float binder = damage[idx];
+                float moisture = phase_data[idx];
+                float channel = Jp_data[idx];
+                vec3 crumb_c = mix(vec3(0.98, 0.86, 0.64), vec3(0.56, 0.32, 0.14), binder);
+                crumb_c = mix(crumb_c, vec3(1.00, 0.95, 0.82), channel * 0.20);
+                crumb_c = mix(crumb_c, vec3(0.92, 0.82, 0.68), moisture * 0.14);
+                cur.rgb = mix(cur.rgb, crumb_c, 0.80);
+                cur.rgb = mix(cur.rgb, vec3(0.24, 0.10, 0.04), channel * 0.24);
+            } else if (mat_type == 48u) {
+                float fired = damage[idx];
+                float moisture = phase_data[idx];
+                float pore = Jp_data[idx];
+                vec3 clay_c = mix(vec3(0.88, 0.76, 0.66), vec3(0.64, 0.40, 0.26), fired);
+                clay_c = mix(clay_c, vec3(0.98, 0.94, 0.86), pore * 0.20);
+                clay_c = mix(clay_c, vec3(0.86, 0.80, 0.74), moisture * 0.12);
+                cur.rgb = mix(cur.rgb, clay_c, 0.80);
+                cur.rgb = mix(cur.rgb, vec3(0.12, 0.05, 0.03), pore * 0.24);
+            } else if (mat_type == 49u) {
+                float dry = damage[idx];
+                float moisture = phase_data[idx];
+                float vent = Jp_data[idx];
+                vec3 skin_c = mix(vec3(0.96, 0.90, 0.72), vec3(0.82, 0.58, 0.26), dry);
+                skin_c = mix(skin_c, vec3(0.98, 0.95, 0.86), moisture * 0.14);
+                cur.rgb = mix(cur.rgb, skin_c, 0.78);
+                cur.rgb = mix(cur.rgb, vec3(0.18, 0.07, 0.03), vent * 0.26);
+            }
+            if ((u_use_bio_field != 0 || u_use_automata_field != 0) &&
+                (mat_type == 32u || mat_type == 33u || mat_type == 34u || mat_type == 59u ||
+                 mat_type == 63u || mat_type == 64u || mat_type == 65u || mat_type == 66u)) {
+                float bio_vis = max(clamp(sample_bio_b(new_pos), 0.0, 1.0),
+                                    clamp(sample_bio_source(new_pos) * 1.2, 0.0, 1.0));
+                float auto_vis = clamp(sample_automata(new_pos), 0.0, 1.0);
+                vec3 bio_c = mix(vec3(0.18, 0.34, 0.92), vec3(0.96, 0.96, 0.74), bio_vis);
+                vec3 auto_c = mix(vec3(0.10, 0.16, 0.32), vec3(0.26, 0.86, 0.64), auto_vis);
+                cur.rgb = mix(cur.rgb, bio_c, bio_vis * 0.18);
+                cur.rgb = mix(cur.rgb, auto_c, auto_vis * 0.24);
+            }
+            if ((u_mouse_mode == 1 || u_mouse_mode == 3) && spring_weight[idx] > 0.0) {
+                cur.rgb = mix(cur.rgb, vec3(0.40, 0.92, 1.0), 0.42);
+            }
+            colors[p] = cur;
+        }
+        return;
+    }
+
+    vec4 color;
+    speed = length(new_vel);
+
+    mat2 F_vis = mat2(deform_grads[idx].x, deform_grads[idx].y, deform_grads[idx].z, deform_grads[idx].w);
+    SVD2 s_vis = svd2x2(F_vis);
+    mat2 R_vis = s_vis.U * transpose(s_vis.V);
+    float dev_vis = length(vec4((F_vis - R_vis)[0], (F_vis - R_vis)[1]));
+    float J_vis = determinant(F_vis);
+    float density_proxy = clamp(1.0 / max(J_vis, 0.30), 0.0, 2.2);
+    float temp_vis = clamp((temp - 240.0) / 620.0, 0.0, 1.0);
+    float stress_vis = clamp(dev_vis * 3.2, 0.0, 1.0);
+    float damage_vis = clamp(damage[idx], 0.0, 1.0);
+    float phase_vis = clamp(phase_data[idx], 0.0, 1.0);
+    float jp_vis = clamp(Jp_data[idx], 0.0, 1.0);
+
+    if (u_vis_mode == 1) {
+        // Velocity
+        color = vec4(viridis(speed * 0.3), 1.0);
+    } else if (u_vis_mode == 2) {
+        // Stress proxy: ||F - R|| via SVD
+        color = vec4(viridis(dev_vis * 5.0), 1.0);
+    } else if (u_vis_mode == 3) {
+        // Deformation norm ||F||
+        float fn = length(deform_grads[idx]);
+        color = vec4(viridis((fn - 1.41) * 3.0), 1.0);
+    } else if (u_vis_mode == 4) {
+        // Damage
+        float d = damage[idx];
+        color = vec4(mix(vec3(0.1), vec3(1.0, 0.0, 0.0), d), 1.0);
+    } else if (u_vis_mode == 5) {
+        // Temperature
+        color = vec4(heat_color((temp - 200.0) / 600.0), 1.0);
+    } else if (u_vis_mode == 6) {
+        // Jp (plasticity)
+        float jp = Jp_data[idx];
+        color = vec4(viridis((jp - 0.6) / 1.4), 1.0);
+    } else if (u_vis_mode == 7) {
+        // Compression / density proxy
+        color = vec4(coolwarm((density_proxy - 0.70) / 0.90), 1.0);
+    } else if (u_vis_mode == 8) {
+        // Packed RGB: temperature, stress, damage
+        color = vec4(vec3(temp_vis, stress_vis, damage_vis), 1.0);
+        } else if (u_vis_mode == 9) {
+            // Packed RGB: damage/hardening, phase/memory, plasticity/compression
+            float blue = clamp(max(jp_vis, (density_proxy - 1.0) * 0.85), 0.0, 1.0);
+            color = vec4(vec3(damage_vis, phase_vis, blue), 1.0);
+        } else if (u_vis_mode == 10) {
+            // Latent SmoothLife / colony field sampled at the particle.
+            float latent_raw = clamp(sample_automata(new_pos) * max(u_automata_view_gain, 0.01), 0.0, 1.0);
+            vec2 latent_grad = sample_automata_gradient(new_pos);
+            float frontier = clamp(length(latent_grad) * 0.55, 0.0, 1.0);
+            float latent = smoothstep(0.004, 0.24, latent_raw);
+            latent = pow(latent, 0.58);
+            float plateau = smoothstep(0.05, 0.54, latent_raw);
+            vec3 c;
+            if (latent < 0.20) c = mix(vec3(0.08, 0.10, 0.18), vec3(0.18, 0.34, 0.86), latent / 0.20);
+            else if (latent < 0.48) c = mix(vec3(0.18, 0.34, 0.86), vec3(0.18, 0.86, 0.62), (latent - 0.20) / 0.28);
+            else if (latent < 0.78) c = mix(vec3(0.18, 0.86, 0.62), vec3(0.98, 0.88, 0.28), (latent - 0.48) / 0.30);
+            else c = mix(vec3(0.98, 0.88, 0.28), vec3(1.0, 0.98, 0.92), (latent - 0.78) / 0.22);
+            c = mix(c, vec3(1.0, 0.97, 0.90), plateau * 0.30);
+            c = mix(c, vec3(1.0, 0.90, 1.0), frontier * 0.82);
+            c += vec3(0.06, 0.08, 0.12) * frontier;
+            color = vec4(c, 1.0);
+        } else if (u_vis_mode == 11) {
+            vec2 drive = bio_debug_force;
+            float mag = clamp(length(drive) * 0.24, 0.0, 1.0);
+            vec2 dir = mag > 1e-5 ? normalize(drive) : vec2(0.0);
+            vec3 drive_c = vec3(0.5 + 0.5 * dir.x, 0.5 + 0.5 * dir.y, mag);
+            if (mat_type == 66u) {
+                vec3 state_c = ash_regrowth_state_color(damage[idx], phase_data[idx], Jp_data[idx], temp_here);
+                drive_c = mix(state_c * 0.78, drive_c, 0.36 + 0.46 * mag);
+                drive_c += state_c * (0.08 + 0.12 * (1.0 - mag));
+            }
+            color = vec4(drive_c, 1.0);
+        } else if (u_vis_mode == 12) {
+            vec2 drive = automata_debug_force;
+            float mag = clamp(length(drive) * 0.24, 0.0, 1.0);
+            vec2 dir = mag > 1e-5 ? normalize(drive) : vec2(0.0);
+            vec3 drive_c = vec3(0.5 + 0.5 * dir.x, 0.5 + 0.5 * dir.y, mag);
+            if (mat_type == 66u) {
+                vec3 state_c = ash_regrowth_state_color(damage[idx], phase_data[idx], Jp_data[idx], temp_here);
+                drive_c = mix(state_c * 0.78, drive_c, 0.36 + 0.46 * mag);
+                drive_c += state_c * (0.08 + 0.12 * (1.0 - mag));
+            }
+            color = vec4(drive_c, 1.0);
+        } else if (u_vis_mode == 13) {
+            vec3 authored = clamp(colors[idx].rgb, vec3(0.0), vec3(1.0));
+            float authored_luma = dot(authored, vec3(0.299, 0.587, 0.114));
+            if (authored_luma < 0.02) {
+                authored = vec3(0.68, 0.68, 0.72);
+            }
+            color = vec4(authored, 1.0);
+        } else {
+        // Mode 0: Material default color
+        if (mat_type == 0u) color = vec4(0.1, 0.3, 0.8, 1.0);
+        else if (mat_type == 1u) color = vec4(0.2, 0.7, 0.3, 1.0);
+        else if (mat_type == 2u) color = vec4(0.85, 0.88, 0.95, 1.0);
+        else if (mat_type == 3u) {
+            // Aniso: wood color → charred black when heated
+            float charred = damage[idx];
+            vec3 c = mix(vec3(0.8, 0.5, 0.2), vec3(0.15, 0.08, 0.03), charred);
+            if (temp_here > 400.0) c += vec3(0.3, 0.1, 0.0) * clamp((temp_here-400.0)/400.0, 0.0, 0.5);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 4u) color = vec4(heat_color((temp-200.0)/600.0), 1.0);
+        else if (mat_type == 5u) {
+            // Fracture: brown → dark red by damage
+            float d = damage[idx];
+            color = vec4(mix(vec3(0.6,0.4,0.15), vec3(0.2,0.05,0.0), d), 1.0);
+        }
+        else if (mat_type == 6u) {
+            // Phase-field: blue(solid) → cyan(mushy) → transparent(liquid)
+            float phi = phase_data[idx];
+            vec3 c;
+            if (phi < 0.5) c = mix(vec3(0.3,0.5,0.9), vec3(0.2,0.8,0.9), phi*2.0);
+            else c = mix(vec3(0.2,0.8,0.9), vec3(0.15,0.4,0.8), (phi-0.5)*2.0);
+            color = vec4(c, mix(1.0, 0.6, phi));
+        }
+        else if (mat_type == 7u) {
+            // Burning: brown → orange → bright yellow → grey ash
+            float burn = damage[idx];
+            vec3 c;
+            if (burn < 0.3) c = mix(vec3(0.5,0.3,0.1), vec3(1.0,0.5,0.1), burn/0.3);
+            else if (burn < 0.7) c = mix(vec3(1.0,0.5,0.1), vec3(1.0,0.9,0.3), (burn-0.3)/0.4);
+            else c = mix(vec3(1.0,0.9,0.3), vec3(0.3,0.3,0.3), (burn-0.7)/0.3);
+            if (burn > 0.05 && burn < 0.9)
+                c += vec3(0.3, 0.15, 0.0) * sin(temp_here * 0.01 + speed * 5.0);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 8u) {
+            // Ember/spark: bright orange/white core, stays glowing
+            float burn = damage[idx];
+            float glow = clamp((temp_here - 350.0) / 600.0, 0.0, 1.0);
+            vec3 c;
+            if (burn < 0.4) c = mix(vec3(0.6,0.3,0.1), vec3(1.0,0.6,0.1), burn/0.4);
+            else c = mix(vec3(1.0,0.7,0.2), vec3(1.0,0.95,0.8), glow);
+            // Bright emissive when hot
+            c += vec3(0.5, 0.3, 0.1) * glow;
+            color = vec4(c, mix(1.0, 0.7, burn));
+        }
+        else if (mat_type == 9u) {
+            // Hardening: very visible color change
+            float cured = damage[idx];
+            vec3 c;
+            // Soft=light blue/grey → Curing=warm orange → Cured=deep brown
+            if (cured < 0.2) c = mix(vec3(0.55,0.55,0.7), vec3(0.8,0.5,0.2), cured/0.2);
+            else if (cured < 0.6) c = mix(vec3(0.8,0.5,0.2), vec3(0.6,0.3,0.1), (cured-0.2)/0.4);
+            else c = mix(vec3(0.6,0.3,0.1), vec3(0.25,0.12,0.05), (cured-0.6)/0.4);
+            // Bright glow when actively being heated above cure temp
+            if (temp_here > 400.0) c += vec3(0.3, 0.1, 0.0) * clamp((temp_here-400.0)/300.0, 0.0, 0.8);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 10u) {
+            // Ceramic: cream → terracotta (cured) + dark crack lines
+            float cured = damage[idx];
+            float crack = Jp_data[idx];
+            vec3 c;
+            if (cured < 0.3) c = mix(vec3(0.85,0.8,0.75), vec3(0.8,0.55,0.4), cured/0.3);
+            else c = mix(vec3(0.8,0.55,0.4), vec3(0.6,0.35,0.25), (cured-0.3)/0.7);
+            c = mix(c, vec3(0.1, 0.05, 0.02), crack * 0.6);
+            if (temp_here > 400.0) c += vec3(0.15, 0.03, 0.0) * clamp((temp_here-400.0)/400.0, 0.0, 0.3);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 11u) {
+            // Composite: brown wood + directional crack darkening
+            float cured = damage[idx];
+            float crack = Jp_data[idx];
+            vec3 base_c = mix(vec3(0.6,0.45,0.3), vec3(0.4,0.25,0.15), cured);
+            // Crack shows as lighter splits (exposed grain)
+            vec3 crack_c = mix(base_c, vec3(0.8,0.65,0.4), crack * 0.5);
+            vec3 c = mix(base_c, crack_c, crack);
+            if (temp_here > 400.0) c += vec3(0.15, 0.03, 0.0) * clamp((temp_here-400.0)/400.0, 0.0, 0.3);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 12u) {
+            float d = damage[idx];
+            vec3 c = mix(vec3(0.62, 0.52, 0.42), vec3(0.18, 0.05, 0.03), d);
+            if (temp_here > 420.0) c += vec3(0.14, 0.04, 0.01) * clamp((temp_here - 420.0) / 300.0, 0.0, 0.3);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 13u) {
+            float d = damage[idx];
+            vec3 c = mix(vec3(0.42, 0.3, 0.2), vec3(0.16, 0.08, 0.04), d);
+            if (temp_here > 420.0) c += vec3(0.12, 0.03, 0.0) * clamp((temp_here - 420.0) / 300.0, 0.0, 0.25);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 14u) {
+            float soft = phase_data[idx];
+            float crack = damage[idx];
+            vec3 c = mix(vec3(0.72, 0.84, 0.95), vec3(1.0, 0.56, 0.18), soft);
+            c = mix(c, vec3(0.08, 0.02, 0.01), crack * 0.45);
+            color = vec4(c, mix(1.0, 0.75, soft));
+        }
+        else if (mat_type == 15u) {
+            float cured = damage[idx];
+            float crack = Jp_data[idx];
+            float bloom = phase_data[idx];
+            vec3 c = mix(vec3(0.88, 0.72, 0.5), vec3(0.74, 0.28, 0.08), cured);
+            c += vec3(0.15, 0.04, 0.0) * bloom;
+            c = mix(c, vec3(0.08, 0.03, 0.01), crack * 0.6);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 16u) {
+            float burn = damage[idx];
+            vec3 c;
+            if (burn < 0.4) c = mix(vec3(0.78, 0.62, 0.18), vec3(0.95, 0.48, 0.08), burn / 0.4);
+            else c = mix(vec3(0.95, 0.48, 0.08), vec3(0.16, 0.12, 0.09), (burn - 0.4) / 0.6);
+            if (burn > 0.05 && burn < 0.9) c += vec3(0.2, 0.08, 0.0) * clamp((temp_here - 350.0) / 500.0, 0.0, 1.0);
+            color = vec4(c, 0.92);
+        }
+        else if (mat_type == 17u) {
+            float pore = damage[idx];
+            float soft = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.78, 0.76, 0.64), vec3(0.95, 0.82, 0.52), soft);
+            c = mix(c, vec3(0.35, 0.25, 0.14), pore * 0.55);
+            c = mix(c, vec3(0.1, 0.05, 0.02), crack * 0.4);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 18u) {
+            float cured = damage[idx];
+            float crack = Jp_data[idx];
+            float split = phase_data[idx];
+            vec3 c = mix(vec3(0.84, 0.68, 0.42), vec3(0.92, 0.44, 0.14), cured);
+            c += vec3(0.15, 0.05, 0.0) * split;
+            c = mix(c, vec3(0.08, 0.03, 0.01), crack * 0.6);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 19u) {
+            float baked = damage[idx];
+            float gas = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.86, 0.74, 0.50), vec3(0.58, 0.33, 0.12), baked);
+            c += vec3(0.14, 0.07, 0.01) * gas;
+            c = mix(c, vec3(0.16, 0.07, 0.03), tear * 0.5);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 20u) {
+            float cured = damage[idx];
+            float gas = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.82, 0.66, 0.48), vec3(0.72, 0.30, 0.14), cured);
+            c += vec3(0.12, 0.05, 0.0) * gas;
+            c = mix(c, vec3(0.08, 0.03, 0.01), crack * 0.62);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 21u) {
+            float fuse = damage[idx];
+            float gas = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.82, 0.16, 0.12), vec3(1.0, 0.56, 0.12), fuse);
+            c += vec3(0.25, 0.08, 0.0) * gas;
+            c = mix(c, vec3(0.12, 0.03, 0.02), crack * 0.72);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 22u) {
+            float cured = damage[idx];
+            float glaze = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.92, 0.80, 0.66), vec3(0.74, 0.40, 0.20), cured);
+            c = mix(c, vec3(0.98, 0.88, 0.54), glaze * 0.65);
+            c = mix(c, vec3(0.10, 0.04, 0.02), crack * 0.6);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 23u) {
+            float crust = damage[idx];
+            float gas = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.90, 0.76, 0.52), vec3(0.55, 0.30, 0.10), crust);
+            c += vec3(0.14, 0.07, 0.01) * gas;
+            c = mix(c, vec3(0.16, 0.07, 0.03), tear * 0.55);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 24u) {
+            float hard = damage[idx];
+            float hot_mem = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.62, 0.64, 0.70), vec3(1.0, 0.52, 0.16), clamp((temp_here - 360.0) / 540.0, 0.0, 1.0));
+            c = mix(c, vec3(0.78, 0.82, 0.90), hard * 0.38);
+            c += vec3(0.08, 0.04, 0.0) * hot_mem;
+            c = mix(c, vec3(0.12, 0.03, 0.02), crack * 0.4);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 25u) {
+            float charred = damage[idx];
+            float gas = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.56, 0.20, 0.12), vec3(0.16, 0.08, 0.06), charred);
+            c += vec3(0.30, 0.11, 0.0) * gas;
+            c = mix(c, vec3(0.10, 0.03, 0.02), crack * 0.7);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 62u) {
+            float cooked = damage[idx];
+            float gas = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.70, 0.16, 0.10), vec3(1.0, 0.62, 0.20), cooked);
+            c += vec3(0.34, 0.12, 0.02) * gas;
+            c = mix(c, vec3(0.12, 0.03, 0.02), crack * 0.76);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 26u) {
+            float cured = damage[idx];
+            float glaze = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.96, 0.82, 0.62), vec3(0.98, 0.70, 0.30), glaze);
+            c = mix(c, vec3(0.70, 0.36, 0.18), cured * 0.50);
+            c = mix(c, vec3(0.10, 0.04, 0.02), crack * 0.48);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 27u) {
+            float skin = damage[idx];
+            float gas = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.96, 0.84, 0.58), vec3(0.86, 0.60, 0.24), skin);
+            c += vec3(0.12, 0.06, 0.01) * gas;
+            c = mix(c, vec3(0.16, 0.08, 0.03), tear * 0.36);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 28u) {
+            float stringy = damage[idx];
+            float soft = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.74, 0.86, 0.98), vec3(1.0, 0.64, 0.18), soft);
+            c += vec3(0.18, 0.10, 0.02) * stringy;
+            c = mix(c, vec3(0.10, 0.03, 0.02), tear * 0.30);
+            color = vec4(c, mix(1.0, 0.82, soft));
+        }
+        else if (mat_type == 29u) {
+            float stringy = damage[idx];
+            float soft = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.98, 0.88, 0.44), vec3(0.92, 0.60, 0.16), soft);
+            c += vec3(0.14, 0.08, 0.01) * stringy;
+            c = mix(c, vec3(0.28, 0.12, 0.04), tear * 0.16);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 30u) {
+            float recover = damage[idx];
+            float soft = phase_data[idx];
+            vec3 c = mix(vec3(0.92, 0.76, 0.42), vec3(1.0, 0.48, 0.16), soft);
+            c = mix(c, vec3(0.98, 0.90, 0.70), recover * 0.25);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 31u) {
+            // Ferrofluid: bright orange base, slightly brighter where the
+            // magnetic field is stronger (stateless coloring, no legacy
+            // chain/phase/spike state now that the Tait EOS replaced them).
+            vec4 mf = sample_magnetic_field(pos);
+            float h_mag = (u_use_real_magnetics != 0) ? clamp(mf.z * 0.05, 0.0, 1.0) : 0.0;
+            vec3 c = mix(vec3(0.95, 0.55, 0.15), vec3(1.0, 0.80, 0.30), h_mag);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 32u) {
+            float brown = damage[idx];
+            float dry = phase_data[idx];
+            float blister = Jp_data[idx];
+            vec3 c = mix(vec3(0.96, 0.84, 0.54), vec3(0.42, 0.20, 0.08), brown);
+            c = mix(c, vec3(0.84, 0.66, 0.34), dry * 0.25);
+            c = mix(c, vec3(0.24, 0.10, 0.04), blister * 0.18);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 33u) {
+            float wilt = damage[idx];
+            float spores = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.72, 0.68, 0.52), vec3(0.46, 0.34, 0.20), wilt);
+            c = mix(c, vec3(0.88, 0.82, 0.68), spores * 0.30);
+            c = mix(c, vec3(0.18, 0.12, 0.08), crack * 0.18);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 34u) {
+            float dry = damage[idx];
+            float pore = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.95, 0.80, 0.54), vec3(0.58, 0.34, 0.14), dry);
+            c = mix(c, vec3(0.98, 0.90, 0.72), pore * 0.30);
+            c = mix(c, vec3(0.22, 0.10, 0.04), tear * 0.28);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 35u) {
+            float sinter = damage[idx];
+            float pore = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.90, 0.78, 0.68), vec3(0.74, 0.44, 0.24), sinter);
+            c = mix(c, vec3(0.96, 0.92, 0.82), pore * 0.24);
+            c = mix(c, vec3(0.12, 0.05, 0.03), crack * 0.52);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 36u) {
+            float dry = damage[idx];
+            float weak = phase_data[idx];
+            float tear = Jp_data[idx];
+            vec3 c = mix(vec3(0.96, 0.88, 0.68), vec3(0.82, 0.56, 0.24), dry);
+            c = mix(c, vec3(0.98, 0.94, 0.84), weak * 0.16);
+            c = mix(c, vec3(0.20, 0.08, 0.03), tear * 0.42);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 37u) {
+            float bake = damage[idx];
+            float steam = phase_data[idx];
+            float delam = Jp_data[idx];
+            vec3 c = mix(vec3(0.98, 0.86, 0.58), vec3(0.62, 0.34, 0.12), bake);
+            c = mix(c, vec3(1.00, 0.94, 0.78), steam * 0.20);
+            c = mix(c, vec3(0.30, 0.14, 0.05), delam * 0.36);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 38u) {
+            float fired = damage[idx];
+            float shrink = phase_data[idx];
+            float craze = Jp_data[idx];
+            vec3 c = mix(vec3(0.72, 0.62, 0.56), vec3(0.52, 0.30, 0.18), fired);
+            c = mix(c, vec3(0.86, 0.80, 0.74), shrink * 0.10);
+            c = mix(c, vec3(0.10, 0.04, 0.03), craze * 0.44);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 39u) {
+            float bend = damage[idx];
+            vec3 c = mix(vec3(0.78, 0.56, 0.26), vec3(0.58, 0.34, 0.12), bend);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 40u) {
+            float cure = damage[idx];
+            float cross = phase_data[idx];
+            float crack = Jp_data[idx];
+            vec3 c = mix(vec3(0.86, 0.64, 0.34), vec3(0.48, 0.26, 0.10), cure);
+            c = mix(c, vec3(0.96, 0.90, 0.80), cross * 0.12);
+            c = mix(c, vec3(0.16, 0.06, 0.03), crack * 0.42);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 41u) {
+            float dry = damage[idx];
+            float moisture = phase_data[idx];
+            float vent = Jp_data[idx];
+            vec3 c = mix(vec3(0.97, 0.82, 0.58), vec3(0.58, 0.34, 0.14), dry);
+            c = mix(c, vec3(0.98, 0.92, 0.76), moisture * 0.20);
+            c = mix(c, vec3(0.22, 0.10, 0.04), vent * 0.36);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 42u) {
+            float fired = damage[idx];
+            float shrink = phase_data[idx];
+            float craze = Jp_data[idx];
+            vec3 c = mix(vec3(0.74, 0.66, 0.60), vec3(0.50, 0.30, 0.20), fired);
+            c = mix(c, vec3(0.92, 0.86, 0.80), shrink * 0.12);
+            c = mix(c, vec3(0.10, 0.04, 0.03), craze * 0.40);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 43u) {
+            float glaze = damage[idx];
+            float blister = phase_data[idx];
+            float vent = Jp_data[idx];
+            vec3 c = mix(vec3(0.98, 0.84, 0.64), vec3(0.78, 0.42, 0.20), glaze);
+            c = mix(c, vec3(1.00, 0.94, 0.82), blister * 0.18);
+            c = mix(c, vec3(0.18, 0.08, 0.04), vent * 0.34);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 44u) {
+            float dry = damage[idx];
+            float moisture = phase_data[idx];
+            float pore = Jp_data[idx];
+            vec3 c = mix(vec3(0.99, 0.84, 0.62), vec3(0.60, 0.34, 0.14), dry);
+            c = mix(c, vec3(1.00, 0.95, 0.82), pore * 0.22);
+            c = mix(c, vec3(0.94, 0.82, 0.66), moisture * 0.12);
+            c = mix(c, vec3(0.20, 0.08, 0.03), pore * 0.18);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 45u) {
+            float fired = damage[idx];
+            float shrink = phase_data[idx];
+            float lock = Jp_data[idx];
+            vec3 c = mix(vec3(0.68, 0.60, 0.56), vec3(0.46, 0.28, 0.18), fired);
+            c = mix(c, vec3(0.86, 0.82, 0.78), shrink * 0.10);
+            c = mix(c, vec3(0.94, 0.90, 0.84), lock * 0.08);
+            c = mix(c, vec3(0.08, 0.03, 0.02), smoothstep(0.70, 1.0, lock) * 0.20);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 46u) {
+            float binder = damage[idx];
+            float moisture = phase_data[idx];
+            float pore = Jp_data[idx];
+            vec3 c = mix(vec3(0.97, 0.84, 0.60), vec3(0.58, 0.34, 0.14), binder);
+            c = mix(c, vec3(1.00, 0.94, 0.80), pore * 0.20);
+            c = mix(c, vec3(0.94, 0.86, 0.72), moisture * 0.16);
+            c = mix(c, vec3(0.20, 0.08, 0.03), pore * 0.16);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 47u) {
+            float binder = damage[idx];
+            float moisture = phase_data[idx];
+            float channel = Jp_data[idx];
+            vec3 c = mix(vec3(0.98, 0.86, 0.64), vec3(0.56, 0.32, 0.14), binder);
+            c = mix(c, vec3(1.00, 0.95, 0.82), channel * 0.18);
+            c = mix(c, vec3(0.92, 0.82, 0.68), moisture * 0.14);
+            c = mix(c, vec3(0.24, 0.10, 0.04), channel * 0.20);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 48u) {
+            float fired = damage[idx];
+            float moisture = phase_data[idx];
+            float pore = Jp_data[idx];
+            vec3 c = mix(vec3(0.88, 0.76, 0.66), vec3(0.64, 0.40, 0.26), fired);
+            c = mix(c, vec3(0.98, 0.94, 0.86), pore * 0.18);
+            c = mix(c, vec3(0.86, 0.80, 0.74), moisture * 0.10);
+            c = mix(c, vec3(0.12, 0.05, 0.03), pore * 0.20);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 49u) {
+            float dry = damage[idx];
+            float moisture = phase_data[idx];
+            float vent = Jp_data[idx];
+            vec3 c = mix(vec3(0.96, 0.90, 0.72), vec3(0.82, 0.58, 0.26), dry);
+            c = mix(c, vec3(0.98, 0.95, 0.86), moisture * 0.14);
+            c = mix(c, vec3(0.18, 0.07, 0.03), vent * 0.22);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 57u) {
+            vec4 mf = sample_magnetic_field(pos);
+            vec3 c = mix(vec3(0.56, 0.60, 0.66), vec3(0.78, 0.84, 0.92), clamp(mf.z * 0.03, 0.0, 1.0));
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 58u) {
+            vec4 mf = sample_magnetic_field(pos);
+            vec3 c = mix(vec3(0.44, 0.48, 0.56), vec3(0.72, 0.80, 0.92), clamp(mf.z * 0.025, 0.0, 1.0));
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 59u) {
+            float split = damage[idx];
+            float heal = phase_data[idx];
+            float pore = Jp_data[idx];
+            vec3 c = mix(vec3(0.18, 0.78, 0.58), vec3(0.10, 0.40, 0.26), split);
+            c = mix(c, vec3(0.72, 0.96, 0.84), heal * 0.24);
+            c = mix(c, vec3(0.08, 0.18, 0.12), pore * 0.20);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 60u) {
+            float jam = damage[idx];
+            float yielded = phase_data[idx];
+            float compact = Jp_data[idx];
+            vec3 c = mix(vec3(0.76, 0.68, 0.46), vec3(0.94, 0.86, 0.62), jam);
+            c = mix(c, vec3(0.52, 0.42, 0.26), yielded * 0.34);
+            c = mix(c, vec3(0.30, 0.24, 0.14), compact * 0.12);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 61u) {
+            float hard = damage[idx];
+            float memory = phase_data[idx];
+            float bruise = Jp_data[idx];
+            vec3 c = mix(vec3(0.66, 0.46, 0.88), vec3(0.86, 0.74, 0.98), hard);
+            c = mix(c, vec3(0.92, 0.86, 1.0), memory * 0.18);
+            c = mix(c, vec3(0.28, 0.10, 0.24), bruise * 0.20);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 63u) {
+            float growth = damage[idx];
+            float fold = phase_data[idx];
+            float scar = Jp_data[idx];
+            float scorch = clamp(max(smoothstep(430.0, 760.0, temp_here), scar * 1.10) * (0.82 + 0.18 * (1.0 - growth)), 0.0, 1.0);
+            vec3 c = mix(vec3(0.30, 0.76, 0.56), vec3(0.10, 0.10, 0.09), scorch);
+            c = mix(c, vec3(0.82, 0.96, 0.68), growth * 0.18);
+            c = mix(c, vec3(0.18, 0.44, 0.30), fold * 0.30);
+            c = mix(c, vec3(0.16, 0.12, 0.10), clamp(scar * 0.44 + scorch * 0.40, 0.0, 1.0));
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 64u) {
+            float colonize = damage[idx];
+            float lignify = phase_data[idx];
+            float branch = Jp_data[idx];
+            float scorch = clamp(max(smoothstep(430.0, 760.0, temp_here), branch * 0.72) * (0.86 + 0.14 * (1.0 - colonize)), 0.0, 1.0);
+            vec3 c = mix(vec3(0.40, 0.72, 0.30), vec3(0.12, 0.10, 0.08), scorch);
+            c = mix(c, vec3(0.72, 0.88, 0.46), colonize * 0.14);
+            c = mix(c, vec3(0.34, 0.22, 0.12), lignify * 0.34);
+            c = mix(c, vec3(0.22, 0.44, 0.18), branch * 0.12);
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 65u) {
+            float bud = damage[idx];
+            float seal = phase_data[idx];
+            float frill = Jp_data[idx];
+            float scorch = clamp(max(smoothstep(430.0, 760.0, temp_here), frill * 0.70) * (0.88 + 0.12 * (1.0 - bud)), 0.0, 1.0);
+            vec3 c = mix(vec3(0.92, 0.60, 0.70), vec3(0.12, 0.11, 0.12), scorch);
+            c = mix(c, vec3(0.98, 0.82, 0.88), bud * 0.16);
+            c = mix(c, vec3(0.72, 0.42, 0.52), seal * 0.20);
+            c = mix(c, vec3(0.42, 0.20, 0.28), clamp(frill * 0.24 + scorch * 0.24, 0.0, 1.0));
+            color = vec4(c, 1.0);
+        }
+        else if (mat_type == 66u) {
+            float regrow = damage[idx];
+            float ash = phase_data[idx];
+            float crumble = Jp_data[idx];
+            vec3 c = ash_regrowth_state_color(regrow, ash, crumble, temp_here);
+            color = vec4(c, 1.0);
+        }
+        else color = vec4(0.5, 0.5, 0.5, 1.0);
+
+        // Speed highlight
+        color.rgb += vec3(0.15) * clamp(speed * 0.2, 0.0, 1.0);
+    }
+
+    // Golden highlight for selected batch (works in both color modes)
+    if (p >= u_highlight_start && p < u_highlight_end) {
+        float pulse = sin(u_time * 6.0) * 0.3 + 0.7;
+        vec3 gold = vec3(1.0, 0.85, 0.3);
+        color.rgb = mix(color.rgb, gold, 0.5 * pulse);
+        color.rgb += gold * 0.4 * pulse;
+        color.a = 1.0;
+    }
+    if ((u_mouse_mode == 1 || u_mouse_mode == 3) && spring_weight[idx] > 0.0) {
+        color.rgb = mix(color.rgb, vec3(0.40, 0.92, 1.0), 0.45);
+    }
+
+    colors[p] = color;
+}

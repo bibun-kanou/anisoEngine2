@@ -1,0 +1,125 @@
+#version 450 core
+
+// Continuous automata substrate inspired by SmoothLife:
+// one scalar occupancy field, inner-disk and outer-ring averages, then a
+// smooth birth/survival transition instead of binary cell rules.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 83) readonly buffer AutomataField { float automata_field[]; };
+layout(std430, binding = 84) buffer AutomataFieldOut { float automata_field2[]; };
+layout(std430, binding = 86) readonly buffer BioSupport { float bio_support[]; };
+layout(std430, binding = 66) readonly buffer AirTemp { float air_temp[]; };
+
+uniform ivec2 u_res;
+uniform float u_dt;
+uniform float u_birth_lo;
+uniform float u_birth_hi;
+uniform float u_survive_lo;
+uniform float u_survive_hi;
+uniform float u_inner_radius;
+uniform float u_outer_radius;
+uniform float u_sigmoid;
+uniform float u_ambient_temp;
+
+uint flat_idx(ivec2 c) {
+    return uint(c.y * u_res.x + c.x);
+}
+
+ivec2 clamp_cell(ivec2 c) {
+    return clamp(c, ivec2(0), u_res - 1);
+}
+
+float load_cell(ivec2 c) {
+    return automata_field[flat_idx(clamp_cell(c))];
+}
+
+float sample_field(vec2 c) {
+    vec2 p = clamp(c, vec2(0.0), vec2(u_res) - vec2(1.001));
+    ivec2 i0 = ivec2(floor(p));
+    ivec2 i1 = clamp(i0 + ivec2(1), ivec2(0), u_res - 1);
+    vec2 f = fract(p);
+    float v00 = load_cell(i0);
+    float v10 = load_cell(ivec2(i1.x, i0.y));
+    float v01 = load_cell(ivec2(i0.x, i1.y));
+    float v11 = load_cell(i1);
+    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+}
+
+float sigma(float x, float a, float alpha) {
+    float s = max(alpha, 1e-4);
+    return 1.0 / (1.0 + exp(-(x - a) * 4.0 / s));
+}
+
+float sigma_window(float x, float lo, float hi, float alpha) {
+    return sigma(x, lo, alpha) * (1.0 - sigma(x, hi, alpha));
+}
+
+const vec2 DIRS[16] = vec2[](
+    vec2(1.0, 0.0), vec2(0.9238795, 0.3826834), vec2(0.7071068, 0.7071068), vec2(0.3826834, 0.9238795),
+    vec2(0.0, 1.0), vec2(-0.3826834, 0.9238795), vec2(-0.7071068, 0.7071068), vec2(-0.9238795, 0.3826834),
+    vec2(-1.0, 0.0), vec2(-0.9238795, -0.3826834), vec2(-0.7071068, -0.7071068), vec2(-0.3826834, -0.9238795),
+    vec2(0.0, -1.0), vec2(0.3826834, -0.9238795), vec2(0.7071068, -0.7071068), vec2(0.9238795, -0.3826834)
+);
+
+float inner_mean(vec2 c, float r) {
+    float sum = sample_field(c) * 2.0;
+    float wsum = 2.0;
+    for (int i = 0; i < 8; ++i) {
+        sum += sample_field(c + DIRS[i * 2] * (0.45 * r));
+        sum += sample_field(c + DIRS[i * 2 + 1] * (0.90 * r));
+        wsum += 2.0;
+    }
+    return sum / max(wsum, 1.0);
+}
+
+float ring_mean(vec2 c, float inner_r, float outer_r) {
+    float mid_r = mix(inner_r, outer_r, 0.58);
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int i = 0; i < 16; ++i) {
+        sum += sample_field(c + DIRS[i] * mid_r);
+        sum += sample_field(c + DIRS[i] * outer_r);
+        wsum += 2.0;
+    }
+    return sum / max(wsum, 1.0);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = uint(u_res.x * u_res.y);
+    if (idx >= total) return;
+
+    ivec2 cell = ivec2(int(idx) % u_res.x, int(idx) / u_res.x);
+    vec2 c = vec2(cell) + vec2(0.5);
+    float current = automata_field[idx];
+    float support = clamp(bio_support[idx], 0.0, 1.0);
+    float temp = air_temp[idx];
+
+    float inner_r = max(u_inner_radius, 0.75);
+    float outer_r = max(u_outer_radius, inner_r + 0.5);
+    float m = inner_mean(c, inner_r);
+    float n = ring_mean(c, inner_r, outer_r);
+
+    float alive_mix = sigma(m, 0.5, u_sigmoid);
+    float birth = sigma_window(n, u_birth_lo, u_birth_hi, u_sigmoid);
+    float survive = sigma_window(n, u_survive_lo, u_survive_hi, u_sigmoid);
+    float target = mix(birth, survive, alive_mix);
+
+    // Bias slightly toward coherent filled regions so the field can support
+    // thicker colonies instead of only thin zebra bands.
+    target = clamp(target * 0.82 + m * 0.18, 0.0, 1.0);
+    float support_core = smoothstep(0.10, 0.36, support);
+    float support_halo = smoothstep(0.003, 0.30, support);
+    float ghost_band = max(support_halo - support_core, 0.0);
+    float fire_kill = smoothstep(u_ambient_temp + 150.0, u_ambient_temp + 410.0, temp);
+    target *= mix(0.58, 1.0, support_halo);
+    target = clamp(target + ghost_band * 0.22 + (1.0 - support_halo) * target * 0.10, 0.0, 1.0);
+    target *= (1.0 - 0.84 * fire_kill);
+
+    float relax = clamp(u_dt, 0.0, 1.0);
+    float next = mix(current, target, relax);
+    next -= pow(1.0 - support_halo, 1.6) * next * relax * 0.12;
+    next = max(next - fire_kill * relax * (0.52 + 0.80 * current), 0.0);
+    automata_field2[idx] = clamp(next, 0.0, 1.0);
+}

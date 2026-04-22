@@ -1,0 +1,17 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer DataBuffer {
+    uint data[];
+};
+
+uniform uint u_count;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    // Simple test: each element gets its index * 2 + 1
+    data[idx] = idx * 2u + 1u;
+}

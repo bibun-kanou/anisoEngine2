@@ -1,0 +1,86 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) buffer VelX { float vel_x[]; };
+layout(std430, binding = 61) buffer VelY { float vel_y[]; };
+layout(std430, binding = 66) buffer TempBuffer { float air_temp[]; };
+layout(std430, binding = 68) buffer SmokeBuffer { float smoke[]; };
+layout(std430, binding = 70) buffer VaporBuffer { float vapor[]; };
+
+layout(std430, binding = 73) readonly buffer AirtightOcc { int airtight_occ[]; };
+layout(std430, binding = 74) readonly buffer AirtightSource { int airtight_source[]; };
+layout(std430, binding = 75) readonly buffer AirtightOutside { float airtight_outside[]; };
+layout(std430, binding = 77) readonly buffer AirtightPressureIn { float airtight_pressure_in[]; };
+layout(std430, binding = 78) writeonly buffer AirtightPressureOut { float airtight_pressure_out[]; };
+
+uniform ivec2 u_res;
+uniform ivec2 u_air_res;
+uniform float u_dx;
+uniform float u_dt;
+uniform float u_ambient_temp;
+uniform float u_combustion_hold;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+
+float read_outside(ivec2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return 1.0;
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    return airtight_outside[ci];
+}
+
+ivec2 cavity_to_air_cell(ivec2 cell) {
+    vec2 uv = (vec2(cell) + 0.5) / vec2(max(u_res, ivec2(1)));
+    vec2 air_f = uv * vec2(max(u_air_res, ivec2(1))) - vec2(0.5);
+    return clamp(ivec2(floor(air_f + 0.5)), ivec2(0), max(u_air_res - 1, ivec2(0)));
+}
+
+uint air_index(ivec2 cell) {
+    return uint(cell.y * u_air_res.x + cell.x);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    float occ = float(airtight_occ[idx]) * 0.001;
+    float source = float(airtight_source[idx]) * 0.001;
+    float outside = clamp(airtight_outside[idx], 0.0, 1.0);
+    float trapped = clamp((1.0 - outside) * (1.0 - smoothstep(0.10, 0.28, occ)), 0.0, 1.0);
+    float old_p = max(airtight_pressure_in[idx], 0.0);
+
+    if (occ > 0.28) {
+        airtight_pressure_out[idx] = 0.0;
+        return;
+    }
+
+    ivec2 air_cell = cavity_to_air_cell(cell);
+    uint ai = air_index(air_cell);
+    float temp_here = air_temp[ai];
+    float hot = smoothstep(u_ambient_temp + 20.0, u_ambient_temp + 340.0, temp_here);
+    float drive = source * trapped * mix(180.0, 540.0, hot) * mix(0.55, 1.15, u_combustion_hold);
+    float hold = mix(0.05, 0.996, trapped);
+    float p = old_p * hold + drive * u_dt;
+
+    float vent = smoothstep(0.02, 0.34, 1.0 - trapped) * smoothstep(2.5, 260.0, old_p);
+    if (vent > 1e-4) {
+        float release = old_p * vent;
+        float outside_l = read_outside(cell + ivec2(-1, 0));
+        float outside_r = read_outside(cell + ivec2(1, 0));
+        float outside_d = read_outside(cell + ivec2(0, -1));
+        float outside_u = read_outside(cell + ivec2(0, 1));
+        vec2 vent_dir = vec2(outside_r - outside_l, outside_u - outside_d);
+        float vent_len = length(vent_dir);
+        if (vent_len > 1e-5) vent_dir /= vent_len;
+
+        air_temp[ai] += release * 0.56 * u_dt;
+        smoke[ai] = min(smoke[ai] + release * 0.020 * u_dt, 3.2);
+        vapor[ai] = min(vapor[ai] + release * 0.014 * u_dt, 4.4);
+        vel_x[ai] += vent_dir.x * release * 0.060 * u_dt;
+        vel_y[ai] += vent_dir.y * release * 0.060 * u_dt;
+        p *= max(1.0 - 0.94 * vent, 0.02);
+    }
+
+    airtight_pressure_out[idx] = clamp(p, 0.0, 2200.0);
+}

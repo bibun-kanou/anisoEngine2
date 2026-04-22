@@ -1,0 +1,9 @@
+build/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.log
+*.user
+.vs/
+.claude/

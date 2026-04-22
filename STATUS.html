@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Noita-Gish Engine Status</title>
+<style>
+body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; max-width: 1200px; margin: 0 auto; padding: 20px; }
+h1 { color: #e94560; border-bottom: 2px solid #e94560; padding-bottom: 10px; }
+h2 { color: #0f3460; background: #16213e; padding: 8px 16px; border-radius: 6px; margin-top: 30px; }
+h3 { color: #e94560; }
+table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+th { background: #16213e; padding: 8px; text-align: left; }
+td { padding: 6px 8px; border-bottom: 1px solid #333; }
+.ok { color: #4eca6a; } .partial { color: #f0c040; } .broken { color: #e94560; } .new { color: #60b0ff; }
+.section { background: #16213e; padding: 16px; border-radius: 8px; margin: 10px 0; }
+code { background: #0f3460; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+.stat { display: inline-block; background: #0f3460; padding: 8px 16px; border-radius: 6px; margin: 4px; }
+.stat b { color: #e94560; font-size: 1.3em; }
+</style>
+</head>
+<body>
+<h1>Noita-Gish 2D Physics Engine &mdash; Status Report</h1>
+<p>C++20 / OpenGL 4.5 / Compute Shaders / SDL2 / ImGui &mdash; RTX 4080</p>
+
+<div>
+<span class="stat"><b>34</b> Material Types</span>
+<span class="stat"><b>85</b> Creation Presets</span>
+<span class="stat"><b>13</b> Scenes</span>
+<span class="stat"><b>7</b> Spawn Shapes</span>
+<span class="stat"><b>5</b> SDF Material Presets</span>
+<span class="stat"><b>~40</b> Compute Shaders</span>
+<span class="stat"><b>~7ms</b> Frame Time</span>
+</div>
+
+<h2>Checkpoint 2026-04-15</h2>
+<div class="section">
+<p><b>Magnetics checkpoint:</b> ferrofluid now forms visible peaks and spike-like columns under the cursor magnet, soft iron no longer self-collapses, and magnetic rubber has been stabilized again after the latest constitutive/G2P rebalance.</p>
+<p><b>What works now:</b> cursor magnetic field presets (<code>Probe Pole</code>, <code>Bar Magnet</code>, <code>Wide Pole</code>, <code>Horseshoe</code>), magnetic debug views, soft-iron body response, and ferro pattern formation in cursor-only scenes.</p>
+<p><b>Main remaining failure:</b> any scene that includes magnetic SDF objects can still over-couple into the ferro solve. The current suspicion is that this is primarily an SDF-to-MPM magnetic coupling issue rather than a base ferro constitutive problem.</p>
+</div>
+
+<h2>Physics Solvers</h2>
+<table>
+<tr><th>Solver</th><th>Status</th><th>Notes</th></tr>
+<tr><td>SPH (WCSPH)</td><td class="ok">Working</td><td>Surface tension (CSF), XSPH smoothing, CCD ray-march collision</td></tr>
+<tr><td>Codimensional SPH</td><td class="partial">Partial</td><td>Detection pass works, 1D kernel switching implemented, needs more testing with thin streams</td></tr>
+<tr><td>MPM (MLS-MPM)</td><td class="ok">Working</td><td>34 material types, APIC transfer, int atomic P2G scatter, 5 substeps</td></tr>
+<tr><td>Eulerian Fluid (Air)</td><td class="ok">Working</td><td>MAC grid (512x512), Red-Black GS pressure, vapor system, buoyancy</td></tr>
+<tr><td>SDF Collision</td><td class="ok">Working</td><td>Ray-march CCD for SPH, grid+particle level for MPM</td></tr>
+<tr><td>Heat Transfer</td><td class="ok">Working</td><td>MPM grid scatter, Euler thermal diffusion, per-object SDF thermal props</td></tr>
+</table>
+
+<h2>Material Types (34)</h2>
+<h3>Base Materials</h3>
+<table>
+<tr><th>ID</th><th>Name</th><th>Status</th><th>Key Behavior</th></tr>
+<tr><td>0</td><td>Fluid</td><td class="ok">OK</td><td>Volumetric EOS, isotropic F reset</td></tr>
+<tr><td>1</td><td>Elastic</td><td class="ok">OK</td><td>Neo-Hookean, holds shape</td></tr>
+<tr><td>2</td><td>Snow</td><td class="ok">OK</td><td>Stomakhin plasticity, hardening</td></tr>
+<tr><td>3</td><td>Aniso</td><td class="ok">OK</td><td>Fiber reinforcement, charring when heated</td></tr>
+<tr><td>4</td><td>Thermal</td><td class="ok">OK</td><td>E softens with temperature</td></tr>
+<tr><td>5</td><td>Fracture</td><td class="ok">OK</td><td>Damage accumulation, stress degradation</td></tr>
+<tr><td>6</td><td>Phase</td><td class="ok">OK</td><td>Glass transition, latent heat, solid-liquid</td></tr>
+<tr><td>7</td><td>Burning</td><td class="partial">Partial</td><td>Exothermic, gas phase. Burning duration may be too short with vapor cooling</td></tr>
+<tr><td>8</td><td>Ember</td><td class="partial">Partial</td><td>Slow-cooling sparks. Buoyancy works but subtle</td></tr>
+<tr><td>9</td><td>Harden</td><td class="ok">OK</td><td>Cures above 400K, E ramps 4x</td></tr>
+<tr><td>10</td><td>Ceramic</td><td class="ok">OK</td><td>Cure + brittle fracture, 40% residual E</td></tr>
+<tr><td>11</td><td>Composite</td><td class="ok">OK</td><td>Fiber + cure + directional fracture</td></tr>
+</table>
+
+<h3>New Materials (User-Added)</h3>
+<table>
+<tr><th>ID</th><th>Name</th><th>Status</th><th>Notes</th></tr>
+<tr><td>12</td><td>Brittle</td><td class="partial">May collapse</td><td>Needs per-particle E or higher global E</td></tr>
+<tr><td>13</td><td>Tough</td><td class="partial">May collapse</td><td>Same issue</td></tr>
+<tr><td>14</td><td>Glass</td><td class="partial">May collapse</td><td>Uses E*3.4 when cold but global E may be too low</td></tr>
+<tr><td>15</td><td>Bloom</td><td class="new">New</td><td>Ceramic bloom effect</td></tr>
+<tr><td>16</td><td>Flammable Fluid</td><td class="new">New</td><td>Combustible liquid</td></tr>
+<tr><td>17</td><td>Foam</td><td class="new">New</td><td>Expanding foam</td></tr>
+<tr><td>18</td><td>Splinter</td><td class="new">New</td><td>Directional fracture</td></tr>
+<tr><td>19</td><td>Bread</td><td class="new">New</td><td>Thermal MPM baking!</td></tr>
+<tr><td>20</td><td>Puff Clay</td><td class="new">New</td><td>Expanding clay</td></tr>
+<tr><td>21</td><td>Firecracker</td><td class="broken">Bottom-left drift</td><td>Random burst dir should be symmetric but something pulls it</td></tr>
+<tr><td>22</td><td>Glaze Clay</td><td class="new">New</td><td>Glazing effect</td></tr>
+<tr><td>23</td><td>Crust Dough</td><td class="new">New</td><td>Crust formation</td></tr>
+<tr><td>24</td><td>Thermo Metal</td><td class="new">New</td><td>Thermally responsive metal</td></tr>
+<tr><td>25</td><td>Reactive Burn</td><td class="broken">Bottom-left drift</td><td>Same issue as firecracker</td></tr>
+<tr><td>26</td><td>Glaze Drip</td><td class="new">New</td><td>Dripping glaze</td></tr>
+<tr><td>27</td><td>Steam Bun</td><td class="new">New</td><td>Steam-filled bread</td></tr>
+<tr><td>28</td><td>Filament Glass</td><td class="new">New</td><td>Glass fibers</td></tr>
+<tr><td>29</td><td>Cheese Pull</td><td class="new">New</td><td>Stretchy cheese (codim candidate)</td></tr>
+<tr><td>30</td><td>Memory Wax</td><td class="new">New</td><td>Shape memory material</td></tr>
+<tr><td>31</td><td>Ferro Fluid</td><td class="new">New</td><td>Magnetic fluid</td></tr>
+<tr><td>32</td><td>Maillard</td><td class="new">New</td><td>Cooking reaction</td></tr>
+<tr><td>33</td><td>Mushroom</td><td class="new">New</td><td>Biological growth</td></tr>
+</table>
+
+<h2>Known Issues</h2>
+<div class="section">
+<h3 class="broken">Critical</h3>
+<ul>
+<li><b>Magnetic SDF coupling still unstable:</b> permanent/soft magnetic SDF objects can still overdrive the ferro solve. Cursor-only magnetic scenes are much more stable now, so the remaining failure likely lives in the rigid-SDF magnetic source/coupling path.</li>
+<li><b>Firecracker/Reactive Burn bottom-left drift:</b> P2G burst direction is random+symmetric, so the bias likely comes from the Euler air field or grid boundary conditions. The MAC grid may have a slight asymmetry from the SDF boundary enforcement or the pressure solver iteration order.</li>
+<li><b>Material collapse under gravity:</b> All materials share global E (currently 40000). Materials that compute E_g = E * multiplier may still be too soft if multiplier &lt; 1.0 or if the stress clamp (0.8E) limits the elastic response.</li>
+</ul>
+
+<h3 class="partial">Moderate</h3>
+<ul>
+<li><b>Burning duration too short:</b> Vapor system's latent_cooling may drain heat faster than exothermic generation. Some materials cool before they can propagate fire.</li>
+<li><b>Per-particle E not stored:</b> Preset E values are cosmetic — all particles use global E. Need SSBO for per-particle base_params.</li>
+<li><b>Structural charring subtle:</b> Damage field color changes may be masked by the keep_colors batch mode.</li>
+<li><b>Ash buoyancy weak:</b> G2P buoyancy competes with gravity through the MPM grid. Euler air convection helps but coupling is weak.</li>
+</ul>
+</div>
+
+<h2>Rendering</h2>
+<table>
+<tr><th>Feature</th><th>Status</th></tr>
+<tr><td>SDF terrain with lighting</td><td class="ok">Working</td></tr>
+<tr><td>Particle point sprites</td><td class="ok">Working</td></tr>
+<tr><td>Metaball surface (SPH)</td><td class="ok">Working</td></tr>
+<tr><td>Smoke + Fire overlay</td><td class="ok">Working (MAC grid)</td></tr>
+<tr><td>Temperature field vis</td><td class="ok">Working</td></tr>
+<tr><td>Velocity field vis</td><td class="ok">Working (MAC face-averaged)</td></tr>
+<tr><td>Curl/Divergence vis</td><td class="ok">Working</td></tr>
+<tr><td>Bloom (batch highlight)</td><td class="partial">FBO blur works, may have viewport issues</td></tr>
+<tr><td>Preview outline (7 shapes)</td><td class="ok">Working</td></tr>
+</table>
+
+<h2>UI / Interaction</h2>
+<table>
+<tr><th>Feature</th><th>Status</th></tr>
+<tr><td>Creation menu (5 tabs + 7 quick tabs)</td><td class="ok">Working</td></tr>
+<tr><td>85 material presets with descriptions</td><td class="ok">Working</td></tr>
+<tr><td>Customize panel (E, nu, fiber, temp)</td><td class="ok">Working</td></tr>
+<tr><td>Batch tracking + highlight</td><td class="ok">Working</td></tr>
+<tr><td>Heat gun (G) / Cool gun (C)</td><td class="ok">Working</td></tr>
+<tr><td>Blow tool (B+LMB)</td><td class="ok">Working</td></tr>
+<tr><td>13 scenes (F1-F10+dropdown)</td><td class="ok">Working</td></tr>
+<tr><td>SDF wall drawing/erasing</td><td class="ok">Working</td></tr>
+<tr><td>SDF material presets (5 metals)</td><td class="new">New</td></tr>
+</table>
+
+<h2>Architecture</h2>
+<div class="section">
+<p><b>Physics Pipeline (per frame):</b></p>
+<code>MPM (5 substeps: clear→P2G→grid_op→thermal→G2P) → SPH (2 substeps: hash→density→codim→force) → Euler Air (forces→diffuse→div→pressure(20 RBGS)→project→advect→enforce_bc→inject→drag→blow→heat_gun)</code>
+<p><b>Key SSBO Bindings:</b> 0-12 particles, 13-16 spatial hash+codim, 17 SDF prims, 40-46+55 MPM grid, 47-54 MPM extra, 60-72 Euler MAC grid</p>
+<p><b>Shaders:</b> ~40 compute + ~12 vert/frag</p>
+</div>
+
+<h2>What's NOT Yet Implemented</h2>
+<ul>
+<li>Mass-spring system (Gish character)</li>
+<li>Rigid body physics</li>
+<li>2D ray-traced lighting</li>
+<li>Arcane particle system (Lenia/Smoothlife)</li>
+<li>AI system (Rain World adaptive)</li>
+<li>Weapons + damage system</li>
+<li>Per-particle stored E (base_params SSBO)</li>
+<li>Sound propagation</li>
+</ul>
+
+</body>
+</html>

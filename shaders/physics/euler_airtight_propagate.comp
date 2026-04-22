@@ -1,0 +1,50 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 73) readonly buffer AirtightOcc { int airtight_occ[]; };
+layout(std430, binding = 75) readonly buffer AirtightOutsideIn { float airtight_outside_in[]; };
+layout(std430, binding = 76) writeonly buffer AirtightOutsideOut { float airtight_outside_out[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform ivec2 u_res;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+uniform int u_use_sdf;
+
+bool sample_sdf_solid(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 world_pos = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (world_pos - u_world_min) / (u_world_max - u_world_min);
+    if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) return false;
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+float read_outside(ivec2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return 0.0;
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    return airtight_outside_in[ci];
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    float occ = float(airtight_occ[idx]) * 0.001;
+    bool blocked = sample_sdf_solid(cell) || occ > 0.18;
+    if (blocked) {
+        airtight_outside_out[idx] = 0.0;
+        return;
+    }
+
+    float pass = 1.0 - smoothstep(0.08, 0.22, occ);
+    float best = read_outside(cell) * pass;
+    best = max(best, read_outside(cell + ivec2(-1, 0)) * pass);
+    best = max(best, read_outside(cell + ivec2(1, 0)) * pass);
+    best = max(best, read_outside(cell + ivec2(0, -1)) * pass);
+    best = max(best, read_outside(cell + ivec2(0, 1)) * pass);
+    airtight_outside_out[idx] = clamp(best, 0.0, 1.0);
+}

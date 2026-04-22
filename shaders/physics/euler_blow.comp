@@ -1,0 +1,39 @@
+#version 450 core
+
+// MAC grid blow tool: inject velocity + smoke at cursor
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) buffer VelV { float vel_v[]; };
+layout(std430, binding = 68) buffer Smoke { float smoke[]; };
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min;
+uniform vec2 u_pos;
+uniform vec2 u_direction;
+uniform float u_radius;
+uniform float u_strength;
+uniform float u_dt;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    vec2 world_pos = u_world_min + (vec2(cell) + 0.5) * u_dx;
+
+    float dist = length(world_pos - u_pos);
+    if (dist >= u_radius) return;
+
+    float falloff = 1.0 - dist / u_radius;
+    falloff *= falloff;
+
+    float target_u = u_direction.x * u_strength * falloff;
+    float target_v = u_direction.y * u_strength * falloff;
+    vel_u[idx] = mix(vel_u[idx], target_u, min(u_dt * 5.0, 0.5));
+    vel_v[idx] = mix(vel_v[idx], target_v, min(u_dt * 5.0, 0.5));
+
+    smoke[idx] = min(smoke[idx] + falloff * 1.0 * u_dt, 1.5);
+}

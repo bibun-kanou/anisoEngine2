@@ -1,0 +1,39 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 73) readonly buffer AirtightOcc { int airtight_occ[]; };
+layout(std430, binding = 75) readonly buffer AirtightOutside { float airtight_outside[]; };
+layout(std430, binding = 77) readonly buffer AirtightPressureIn { float airtight_pressure_in[]; };
+layout(std430, binding = 78) writeonly buffer AirtightPressureOut { float airtight_pressure_out[]; };
+
+uniform ivec2 u_res;
+
+float read_pressure(ivec2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return 0.0;
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    return airtight_pressure_in[ci];
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    float occ = float(airtight_occ[idx]) * 0.001;
+    float outside = clamp(airtight_outside[idx], 0.0, 1.0);
+    float trapped = clamp((1.0 - outside) * (1.0 - smoothstep(0.10, 0.28, occ)), 0.0, 1.0);
+    if (trapped <= 1e-4 || occ > 0.28) {
+        airtight_pressure_out[idx] = 0.0;
+        return;
+    }
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    float p0 = max(airtight_pressure_in[idx], 0.0);
+    float avg = 0.25 * (
+        read_pressure(cell + ivec2(-1, 0)) +
+        read_pressure(cell + ivec2(1, 0)) +
+        read_pressure(cell + ivec2(0, -1)) +
+        read_pressure(cell + ivec2(0, 1)));
+    float blend = 0.28 + 0.42 * trapped;
+    airtight_pressure_out[idx] = clamp(mix(p0, avg, blend), 0.0, 2200.0);
+}

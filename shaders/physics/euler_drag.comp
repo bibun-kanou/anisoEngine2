@@ -1,0 +1,61 @@
+#version 450 core
+
+// MAC grid: apply air drag to particles
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 1) buffer VelocityBuffer { vec2 velocities[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+layout(std430, binding = 54) readonly buffer ThermalCouplingBuf { vec4 thermal_coupling[]; };
+
+layout(std430, binding = 60) readonly buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) readonly buffer VelV { float vel_v[]; };
+layout(std430, binding = 70) readonly buffer Vapor { float vapor[]; };
+
+uniform uint u_offset, u_count;
+uniform ivec2 u_res;
+uniform float u_dx, u_dt, u_drag;
+uniform float u_vapor_drag;
+uniform vec2 u_world_min;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    vec2 pos = positions[p];
+    vec2 vel = velocities[p];
+    uint mat = material_ids[p];
+
+    vec2 grid_pos = (pos - u_world_min) / u_dx;
+    ivec2 cell = ivec2(floor(grid_pos));
+
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y)
+        return;
+
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    vec2 air_vel = vec2(vel_u[ci], vel_v[ci]);
+    float steam = clamp(vapor[ci], 0.0, 2.0);
+    float loft = clamp(thermal_coupling[idx].w, 0.0, 2.0);
+
+    vec2 dv = air_vel - vel;
+    float carry = 0.22 + 0.78 * loft;
+    if (mat == 8u) carry = max(carry, 0.95);
+    else if (mat == 50u) carry *= 0.26;
+    else if (mat == 51u) carry *= 0.16;
+    else if (mat == 52u) carry *= 0.28;
+    else if (mat == 53u) carry *= 0.36;
+    else if (mat == 54u) carry *= 0.34;
+    else if (mat == 55u) carry *= 0.18;
+    else if (mat == 56u) carry *= 0.52;
+    else if (mat == 16u) carry *= 0.55;
+    else if (mat == 7u) carry *= 0.35;
+    else if (mat == 21u || mat == 25u) carry *= 0.16;
+    else if (mat == 24u || mat == 14u || mat == 10u || mat == 22u || mat == 26u) carry *= 0.10;
+    else if (mat == 3u || mat == 11u || mat == 12u || mat == 13u || mat == 18u) carry *= 0.18;
+    else if (mat == 19u || mat == 23u || mat == 27u || mat == 29u) carry *= 0.26;
+
+    float drag_scale = u_drag * carry * (1.0 + u_vapor_drag * steam * loft);
+    velocities[p] = vel + dv * drag_scale * u_dt;
+}

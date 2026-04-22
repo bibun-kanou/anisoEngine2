@@ -1,0 +1,132 @@
+#version 450 core
+
+// MPM grid: decode fixed-point → velocity, apply gravity + SDF BCs
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 40) readonly buffer GridMass  { int   grid_mass[];  };
+layout(std430, binding = 41) readonly buffer GridMomX  { int   grid_mom_x[]; };
+layout(std430, binding = 42) readonly buffer GridMomY  { int   grid_mom_y[]; };
+layout(std430, binding = 43) writeonly buffer GridVelX { float grid_vel_x[]; };
+layout(std430, binding = 44) writeonly buffer GridVelY { float grid_vel_y[]; };
+layout(std430, binding = 45) writeonly buffer GridTemp  { float grid_temp[];  };
+layout(std430, binding = 55) readonly buffer GridTempA  { int   grid_temp_ato[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform uint  u_grid_cells;
+uniform ivec2 u_grid_res;
+uniform float u_dx;
+uniform float u_dt;
+uniform vec2  u_grid_origin;
+uniform vec2  u_gravity;
+uniform vec2  u_sdf_world_min;
+uniform vec2  u_sdf_world_max;
+uniform int   u_use_sdf;
+// Mouse force for MPM
+uniform vec2  u_mouse_world;
+uniform float u_mouse_radius;
+uniform float u_mouse_inner_radius;
+uniform float u_mouse_force;
+uniform vec2  u_mouse_dir;
+uniform int   u_mouse_mode;
+
+const float INV_FIXED_SCALE = 1.0 / 1000000.0;
+const float FIXED_SCALE = 1000000.0;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_grid_cells) return;
+
+    float m = float(grid_mass[idx]) * INV_FIXED_SCALE;
+
+    if (m < 1e-10) {
+        grid_vel_x[idx] = 0.0;
+        grid_vel_y[idx] = 0.0;
+        return;
+    }
+
+    // Decode momentum → velocity
+    vec2 vel = vec2(
+        float(grid_mom_x[idx]) * INV_FIXED_SCALE / m,
+        float(grid_mom_y[idx]) * INV_FIXED_SCALE / m
+    );
+
+    // Gravity
+    vel += u_dt * u_gravity;
+
+    // Grid node world position
+    ivec2 node = ivec2(idx % uint(u_grid_res.x), idx / uint(u_grid_res.x));
+    vec2 world_pos = u_grid_origin + vec2(node) * u_dx;
+
+    // Mouse force on grid (applies to MPM)
+    if (u_mouse_force != 0.0) {
+        vec2 to_mouse = u_mouse_world - world_pos;
+        float dist = length(to_mouse);
+        if (u_mouse_mode == 3 || u_mouse_mode == 1) {
+            // Telekinesis and Real Drag are applied per-particle in G2P.
+            // No grid-level force here — would cause contraction.
+        } else if (dist < u_mouse_radius && dist > 1e-4) {
+            float hard_r = clamp(u_mouse_inner_radius, 0.0, u_mouse_radius);
+            float shell = max(u_mouse_radius - hard_r, 1e-4);
+            float falloff = 1.0;
+            if (dist > hard_r && u_mouse_radius > hard_r + 1e-4) {
+                float t = clamp((dist - hard_r) / shell, 0.0, 1.0);
+                falloff = 1.0 - t * t * (3.0 - 2.0 * t);
+            }
+            if (u_mouse_mode == 2 && length(u_mouse_dir) > 1e-5) {
+                float sweep = (dist <= hard_r) ? 1.0 : clamp(1.0 - (dist - hard_r) / shell, 0.0, 1.0);
+                vel += normalize(u_mouse_dir) * u_mouse_force * sweep * sweep * u_dt;
+            } else if (u_mouse_mode == 1 && length(u_mouse_dir) > 1e-5) {
+                vel += normalize(u_mouse_dir) * u_mouse_force * falloff * falloff * u_dt;
+            } else {
+                vec2 dir = to_mouse / dist;
+                float strength = u_mouse_force * falloff;
+                vel += dir * strength * u_dt;
+            }
+        }
+    }
+
+    // SDF boundary conditions
+    if (u_use_sdf == 1) {
+        vec2 uv = (world_pos - u_sdf_world_min) / (u_sdf_world_max - u_sdf_world_min);
+        if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+            float d = texture(u_sdf_tex, uv).r;
+            float margin = u_dx * 1.5;
+            if (d < margin) {
+                vec2 eps = (u_sdf_world_max - u_sdf_world_min) / vec2(textureSize(u_sdf_tex, 0));
+                float dx_sdf = texture(u_sdf_tex, uv + vec2(eps.x, 0)).r
+                             - texture(u_sdf_tex, uv - vec2(eps.x, 0)).r;
+                float dy_sdf = texture(u_sdf_tex, uv + vec2(0, eps.y)).r
+                             - texture(u_sdf_tex, uv - vec2(0, eps.y)).r;
+                vec2 n = normalize(vec2(dx_sdf, dy_sdf) + 1e-8);
+                float vn = dot(vel, n);
+                if (vn < 0.0) {
+                    vel -= vn * n;
+                    vel *= 0.9; // Friction
+                }
+            }
+        } else {
+            // Outside SDF domain → hard stop
+            vel = vec2(0.0);
+        }
+    }
+
+    // Grid boundary
+    int bnd = 3;
+    if (node.x < bnd || node.x >= u_grid_res.x - bnd) vel.x = 0.0;
+    if (node.y < bnd) vel.y = max(vel.y, 0.0);
+    if (node.y >= u_grid_res.y - bnd) vel.y = min(vel.y, 0.0);
+
+    // Very tight velocity clamping: max 3 cells per timestep
+    float max_vel = u_dx * 3.0 / u_dt;
+    float spd = length(vel);
+    if (spd > max_vel) vel *= max_vel / spd;
+
+    grid_vel_x[idx] = vel.x;
+    grid_vel_y[idx] = vel.y;
+
+    // Decode mass-weighted temperature: T_grid = (sum m*T) / (sum m)
+    float temp_weighted = float(grid_temp_ato[idx]) * (1.0 / (FIXED_SCALE * 0.001));
+    grid_temp[idx] = temp_weighted / m; // Mass-averaged temperature
+}

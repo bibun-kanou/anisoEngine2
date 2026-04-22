@@ -1,0 +1,40 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer {
+    vec2 positions[];
+};
+
+layout(std430, binding = 11) writeonly buffer CellIndexBuffer {
+    uint cell_indices[];
+};
+
+layout(std430, binding = 15) coherent buffer CellCountBuffer {
+    uint cell_counts[];
+};
+
+uniform uint u_particle_offset;
+uniform uint u_particle_count;
+uniform uint u_table_size;
+uniform float u_cell_size;
+uniform vec2 u_world_min;
+
+uint hash_cell(ivec2 cell, uint table_size) {
+    uint h = uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u;
+    return h & (table_size - 1u);
+}
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= u_particle_count) return;
+
+    uint global_idx = u_particle_offset + local_idx;
+    vec2 pos = positions[global_idx];
+
+    ivec2 cell = ivec2(floor((pos - u_world_min) / u_cell_size));
+    uint hash = hash_cell(cell, u_table_size);
+
+    cell_indices[global_idx] = hash;
+    atomicAdd(cell_counts[hash], 1u);
+}

@@ -1,0 +1,54 @@
+#version 450 core
+
+// MAC grid projection: subtract pressure gradient at faces
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) buffer VelV { float vel_v[]; };
+layout(std430, binding = 64) readonly buffer Pressure { float pressure[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min, u_world_max;
+uniform int u_use_sdf;
+
+bool is_solid(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return true;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+
+    // u face (left face of cell): between cell(i-1,j) and cell(i,j)
+    if (cell.x > 0 && cell.x < u_res.x) {
+        ivec2 left_cell = cell + ivec2(-1, 0);
+        if (is_solid(cell) || is_solid(left_cell)) {
+            vel_u[idx] = 0.0; // Face on solid boundary: zero normal velocity
+        } else {
+            uint li = uint(left_cell.y * u_res.x + left_cell.x);
+            vel_u[idx] -= (pressure[idx] - pressure[li]) / u_dx;
+        }
+    }
+
+    // v face (bottom face of cell): between cell(i,j-1) and cell(i,j)
+    if (cell.y > 0 && cell.y < u_res.y) {
+        ivec2 below_cell = cell + ivec2(0, -1);
+        if (is_solid(cell) || is_solid(below_cell)) {
+            vel_v[idx] = 0.0; // Face on solid boundary
+        } else {
+            uint bi = uint(below_cell.y * u_res.x + below_cell.x);
+            vel_v[idx] -= (pressure[idx] - pressure[bi]) / u_dx;
+        }
+    }
+}

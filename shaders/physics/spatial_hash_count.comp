@@ -1,0 +1,27 @@
+#version 450 core
+
+// Compute cell_end = cell_start + original_count
+// Run after prefix sum converts counts to starts
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 13) readonly buffer CellStartBuffer {
+    uint cell_start[];
+};
+
+layout(std430, binding = 15) readonly buffer CellCountBuffer {
+    uint cell_counts[]; // Original counts (before prefix sum)
+};
+
+layout(std430, binding = 14) writeonly buffer CellEndBuffer {
+    uint cell_end[];
+};
+
+uniform uint u_table_size;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_table_size) return;
+
+    cell_end[idx] = cell_start[idx] + cell_counts[idx];
+}

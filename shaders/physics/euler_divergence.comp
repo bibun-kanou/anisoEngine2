@@ -1,0 +1,53 @@
+#version 450 core
+
+// MAC grid divergence: exact face-based computation (no interpolation!)
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) readonly buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) readonly buffer VelV { float vel_v[]; };
+layout(std430, binding = 65) writeonly buffer Div { float divergence[]; };
+layout(std430, binding = 72) readonly buffer VaporSource { float vapor_source[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform float u_vapor_pressure;
+uniform vec2 u_world_min, u_world_max;
+uniform int u_use_sdf;
+
+bool is_solid(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return true;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+
+    if (is_solid(cell)) {
+        divergence[idx] = 0.0;
+        return;
+    }
+
+    // MAC divergence: (u_right - u_left + v_top - v_bottom) / dx
+    // u_left = vel_u[i,j] (left face of this cell)
+    // u_right = vel_u[i+1,j] (left face of cell to the right = right face of this cell)
+    // v_bottom = vel_v[i,j] (bottom face of this cell)
+    // v_top = vel_v[i,j+1] (bottom face of cell above = top face of this cell)
+
+    float u_left = vel_u[idx];
+    float u_right = (cell.x + 1 < u_res.x) ? vel_u[idx + 1u] : 0.0;
+    float v_bottom = vel_v[idx];
+    float v_top = (cell.y + 1 < u_res.y) ? vel_v[idx + uint(u_res.x)] : 0.0;
+
+    float flow_div = -((u_right - u_left) + (v_top - v_bottom)) / u_dx;
+    divergence[idx] = flow_div + u_vapor_pressure * vapor_source[idx];
+}

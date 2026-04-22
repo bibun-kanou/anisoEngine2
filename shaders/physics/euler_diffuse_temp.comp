@@ -1,0 +1,140 @@
+#version 450 core
+
+// Thermal diffusion: spreads heat through air using 5-point Laplacian
+// Also cools toward ambient temperature
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 66) readonly buffer TempIn { float temp_in[]; };
+layout(std430, binding = 67) writeonly buffer TempOut { float temp_out[]; };
+layout(std430, binding = 68) readonly buffer SmokeIn { float smoke_in[]; };
+layout(std430, binding = 70) readonly buffer VaporIn { float vapor_in[]; };
+layout(std430, binding = 72) readonly buffer VaporSourceIn { float vapor_source_in[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+layout(binding = 1) uniform sampler2D u_sdf_prop_tex;
+
+uniform ivec2 u_res;
+uniform float u_dx, u_dt;
+uniform float u_thermal_diffusivity; // How fast heat spreads
+uniform float u_solid_thermal_diffusivity; // Heat spreads inside SDF solids
+uniform float u_solid_heat_capacity;       // Heat sink / inertia for solid temperature change
+uniform float u_solid_contact_transfer;    // How fast solids give heat to touching air/material
+uniform float u_solid_heat_loss;           // Extra non-physical disappearance
+uniform float u_ambient_temp;
+uniform float u_cooling_rate;        // How fast air cools to ambient
+uniform float u_combustion_hold;     // How much hot smoky cells resist ambient cooling
+uniform vec2 u_world_min, u_world_max;
+uniform int u_use_sdf;
+uniform int u_physically_based_heat;
+
+bool is_solid_cell(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return false;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) return false;
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+vec4 solid_props(ivec2 cell) {
+    if (u_use_sdf == 0) return vec4(1.0);
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return vec4(1.0);
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) return vec4(1.0);
+    return texture(u_sdf_prop_tex, suv);
+}
+
+float interface_transfer(bool a_solid, bool b_solid, vec4 prop_a, vec4 prop_b) {
+    if (a_solid && b_solid) return u_solid_thermal_diffusivity * max(0.05, 0.5 * (prop_a.x + prop_b.x));
+    if (!a_solid && !b_solid) return u_thermal_diffusivity;
+    return u_solid_contact_transfer * max(0.05, a_solid ? prop_a.z : prop_b.z);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    float T = temp_in[idx];
+
+    // Boundaries
+    if (cell.x <= 0 || cell.x >= u_res.x - 1 ||
+        cell.y <= 0 || cell.y >= u_res.y - 1) {
+        temp_out[idx] = u_ambient_temp;
+        return;
+    }
+
+    // Conductive diffusion with a separate SDF-solid conductivity.
+    // Pairwise averaging keeps the air/solid boundary exchanging heat smoothly.
+    float T_l = temp_in[idx - 1u];
+    float T_r = temp_in[idx + 1u];
+    float T_d = temp_in[idx - uint(u_res.x)];
+    float T_u = temp_in[idx + uint(u_res.x)];
+
+    bool in_solid = is_solid_cell(cell);
+    bool solid_l = is_solid_cell(cell + ivec2(-1, 0));
+    bool solid_r = is_solid_cell(cell + ivec2( 1, 0));
+    bool solid_d = is_solid_cell(cell + ivec2( 0,-1));
+    bool solid_u = is_solid_cell(cell + ivec2( 0, 1));
+
+    vec4 prop_c = solid_props(cell);
+    vec4 prop_l = solid_props(cell + ivec2(-1, 0));
+    vec4 prop_r = solid_props(cell + ivec2( 1, 0));
+    vec4 prop_d = solid_props(cell + ivec2( 0,-1));
+    vec4 prop_u = solid_props(cell + ivec2( 0, 1));
+
+    float k_l = interface_transfer(in_solid, solid_l, prop_c, prop_l);
+    float k_r = interface_transfer(in_solid, solid_r, prop_c, prop_r);
+    float k_d = interface_transfer(in_solid, solid_d, prop_c, prop_d);
+    float k_u = interface_transfer(in_solid, solid_u, prop_c, prop_u);
+    float heat_capacity = in_solid ? max(u_solid_heat_capacity * prop_c.y, 0.1) : 1.0;
+    float T0 = T;
+
+    if (u_physically_based_heat == 1) {
+        float coeff_l = clamp(k_l * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
+        float coeff_r = clamp(k_r * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
+        float coeff_d = clamp(k_d * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
+        float coeff_u = clamp(k_u * u_dt / (u_dx * u_dx * heat_capacity), 0.0, 0.24);
+        float coeff_sum = coeff_l + coeff_r + coeff_d + coeff_u;
+        if (coeff_sum > 0.96) {
+            float scale = 0.96 / coeff_sum;
+            coeff_l *= scale;
+            coeff_r *= scale;
+            coeff_d *= scale;
+            coeff_u *= scale;
+        }
+        T = T0
+          + coeff_l * (T_l - T0)
+          + coeff_r * (T_r - T0)
+          + coeff_d * (T_d - T0)
+          + coeff_u * (T_u - T0);
+    } else {
+        float diffusion = (
+            k_l * (T_l - T0) +
+            k_r * (T_r - T0) +
+            k_d * (T_d - T0) +
+            k_u * (T_u - T0)
+        ) / (u_dx * u_dx);
+        T = in_solid ? (T0 + diffusion * (u_dt / heat_capacity))
+                     : (T0 + diffusion * u_dt);
+    }
+
+    if (in_solid) {
+        float dT = max(T - u_ambient_temp, 0.0);
+        T -= dT * (u_solid_heat_loss * max(prop_c.w, 0.05)) * (u_dt / heat_capacity);
+    } else {
+        float dT = T - u_ambient_temp;
+        float plume = clamp(smoke_in[idx] * 0.70 + vapor_in[idx] * 0.12, 0.0, 1.0);
+        float hot = smoothstep(35.0, 260.0, max(dT, 0.0));
+        float fresh_source = smoothstep(0.02, 0.16, vapor_source_in[idx]);
+        float hold_gate = mix(0.0, plume, fresh_source);
+        float cooling_scale = 1.0 - 0.85 * u_combustion_hold * hold_gate * hot;
+        T -= dT * u_cooling_rate * clamp(cooling_scale, 0.15, 1.0) * u_dt;
+    }
+
+    temp_out[idx] = clamp(T, max(u_ambient_temp - 100.0, 0.0), 2000.0);
+}

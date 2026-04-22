@@ -1,0 +1,52 @@
+#version 450 core
+
+// Builds a loose rough-density envelope around the current blob occupancy so
+// bio / automata fields can extend into nearby gas, then fade out smoothly.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 85) readonly buffer BioSupportSource { float bio_support_source[]; };
+layout(std430, binding = 86) readonly buffer BioSupport { float bio_support[]; };
+layout(std430, binding = 87) buffer BioSupportOut { float bio_support2[]; };
+
+uniform ivec2 u_res;
+uniform float u_decay;
+
+uint flat_idx(ivec2 c) {
+    return uint(c.y * u_res.x + c.x);
+}
+
+ivec2 clamp_cell(ivec2 c) {
+    return clamp(c, ivec2(0), u_res - 1);
+}
+
+float sample_source(ivec2 c) { return bio_support_source[flat_idx(clamp_cell(c))]; }
+float sample_support(ivec2 c) { return bio_support[flat_idx(clamp_cell(c))]; }
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = uint(u_res.x * u_res.y);
+    if (idx >= total) return;
+
+    ivec2 c = ivec2(int(idx) % u_res.x, int(idx) / u_res.x);
+
+    float anchor_raw = max(bio_support_source[idx], 0.0);
+    float anchor = 1.0 - exp(-anchor_raw * 0.9);
+    float blur =
+        sample_support(c) * 0.20 +
+        (sample_support(c + ivec2(-1, 0)) +
+         sample_support(c + ivec2( 1, 0)) +
+         sample_support(c + ivec2( 0,-1)) +
+         sample_support(c + ivec2( 0, 1))) * 0.11 +
+        (sample_support(c + ivec2(-1,-1)) +
+         sample_support(c + ivec2( 1,-1)) +
+         sample_support(c + ivec2(-1, 1)) +
+         sample_support(c + ivec2( 1, 1))) * 0.05 +
+        (sample_support(c + ivec2(-2, 0)) +
+         sample_support(c + ivec2( 2, 0)) +
+         sample_support(c + ivec2( 0,-2)) +
+         sample_support(c + ivec2( 0, 2))) * 0.03;
+
+    float next = anchor * 0.34 + blur * u_decay;
+    bio_support2[idx] = clamp(next, 0.0, 1.0);
+}

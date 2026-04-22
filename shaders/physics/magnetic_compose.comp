@@ -1,0 +1,23 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba32f, binding = 0) uniform image2D u_magnetization;
+
+layout(std430, binding = 19) readonly buffer ParticleMagX { int accum_x[]; };
+layout(std430, binding = 20) readonly buffer ParticleMagY { int accum_y[]; };
+layout(std430, binding = 21) readonly buffer ParticleOcc { int accum_occ[]; };
+
+uniform ivec2 u_resolution;
+uniform float u_accum_scale;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+
+    uint cell = uint(pixel.y * u_resolution.x + pixel.x);
+    vec4 cur = imageLoad(u_magnetization, pixel);
+    cur.xy += vec2(float(accum_x[cell]), float(accum_y[cell])) * u_accum_scale;
+    cur.z += float(accum_occ[cell]) * u_accum_scale;
+    imageStore(u_magnetization, pixel, cur);
+}

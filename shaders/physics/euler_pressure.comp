@@ -1,0 +1,64 @@
+#version 450 core
+
+// Red-Black Gauss-Seidel pressure solve (MAC grid)
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 64) buffer Pressure { float pressure[]; };
+layout(std430, binding = 65) readonly buffer Div { float divergence[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min, u_world_max;
+uniform int u_use_sdf;
+uniform int u_color;
+
+bool is_solid(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return true;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+
+    if ((cell.x + cell.y) % 2 != u_color) return;
+
+    if (cell.x <= 0 || cell.x >= u_res.x - 1 ||
+        cell.y <= 0 || cell.y >= u_res.y - 1) {
+        pressure[idx] = 0.0;
+        return;
+    }
+
+    if (is_solid(cell)) {
+        pressure[idx] = 0.0;
+        return;
+    }
+
+    // Standard Laplacian solve: count non-solid neighbors
+    float self = pressure[idx];
+    float sum = 0.0;
+    float count = 0.0;
+
+    ivec2 neighbors[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
+    for (int n = 0; n < 4; n++) {
+        ivec2 nc = cell + neighbors[n];
+        uint ni = uint(nc.y * u_res.x + nc.x);
+        if (is_solid(nc)) {
+            sum += self; // Neumann BC: solid neighbor uses own pressure
+        } else {
+            sum += pressure[ni];
+        }
+        count += 1.0;
+    }
+
+    pressure[idx] = (sum + u_dx * u_dx * divergence[idx]) / count;
+}

@@ -1,0 +1,183 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba32f, binding = 0) uniform image2D u_magnetization;
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+layout(binding = 1) uniform usampler2D u_sdf_object_ids;
+layout(binding = 2) uniform sampler2D u_prev_field_tex;
+
+struct ObjectMagnetic {
+    uint mode;
+    float strength;
+    float susceptibility;
+    vec2 dir;
+};
+
+layout(std430, binding = 18) readonly buffer ObjectBuffer {
+    ObjectMagnetic objects[];
+};
+
+uniform ivec2 u_resolution;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+uniform vec2 u_sdf_world_min;
+uniform vec2 u_sdf_world_max;
+uniform ivec2 u_sdf_resolution;
+uniform uint u_object_count;
+uniform float u_source_scale;
+uniform float u_rigid_permanent_scale;
+uniform float u_rigid_soft_scale;
+uniform int u_use_cursor;
+uniform vec2 u_cursor_pos;
+uniform vec2 u_cursor_dir;
+uniform float u_cursor_inner_radius;
+uniform float u_cursor_falloff_radius;
+uniform float u_cursor_strength;
+uniform int u_cursor_field_type;
+uniform int u_include_soft;
+uniform int u_include_scene;  // 0 = skip SDF permanent + soft iron objects (cursor-only mode)
+
+float langevin_response(float hmag, float saturation, float alpha) {
+    float x = max(alpha * hmag, 1e-4);
+    float L = (x < 0.12) ? (x / 3.0) : (1.0 / tanh(x) - 1.0 / x);
+    return saturation * clamp(L, 0.0, 1.0);
+}
+
+float sample_sdf_value(ivec2 px) {
+    px = clamp(px, ivec2(0), u_sdf_resolution - ivec2(1));
+    return texelFetch(u_sdf_tex, px, 0).r;
+}
+
+vec2 sample_sdf_normal(ivec2 px) {
+    vec2 cell = (u_sdf_world_max - u_sdf_world_min) / vec2(max(u_sdf_resolution, ivec2(1)));
+    float dl = sample_sdf_value(px + ivec2(-1, 0));
+    float dr = sample_sdf_value(px + ivec2( 1, 0));
+    float db = sample_sdf_value(px + ivec2(0, -1));
+    float dt = sample_sdf_value(px + ivec2(0,  1));
+    vec2 g = vec2((dr - dl) / max(2.0 * cell.x, 1e-5),
+                  (dt - db) / max(2.0 * cell.y, 1e-5));
+    float gm = length(g);
+    return (gm > 1e-6) ? (g / gm) : vec2(0.0, 1.0);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(u_resolution);
+    vec2 world = mix(u_world_min, u_world_max, uv);
+
+    vec2 M = vec2(0.0);
+
+    vec2 sdf_uv = (world - u_sdf_world_min) / (u_sdf_world_max - u_sdf_world_min);
+    if (u_include_scene != 0 &&
+        all(greaterThanEqual(sdf_uv, vec2(0.0))) && all(lessThanEqual(sdf_uv, vec2(1.0)))) {
+        vec2 st = clamp(sdf_uv * vec2(u_sdf_resolution), vec2(0.0), vec2(u_sdf_resolution - ivec2(1)));
+        ivec2 sdf_px = ivec2(st);
+        float d = texelFetch(u_sdf_tex, sdf_px, 0).r;
+        uint object_id = texelFetch(u_sdf_object_ids, sdf_px, 0).r;
+        if (d <= 0.0 && object_id > 0u && object_id <= u_object_count) {
+            ObjectMagnetic obj = objects[object_id - 1u];
+            vec2 sdf_cell = (u_sdf_world_max - u_sdf_world_min) / vec2(max(u_sdf_resolution, ivec2(1)));
+            float shell = max(sdf_cell.x, sdf_cell.y) * 2.5;
+            float interior = smoothstep(0.0, shell, -d);
+            float shell_band = 1.0 - interior;
+            vec2 normal = sample_sdf_normal(sdf_px);
+            if (obj.mode == 1u && obj.strength > 0.0) {
+                vec2 dir = (length(obj.dir) > 1e-6) ? normalize(obj.dir) : vec2(1.0, 0.0);
+                // Permanent rigid magnets behave better in 2D when we inject
+                // magnetization mainly on the pole-facing shell, not across
+                // the whole rigid interior. That keeps the source closer to a
+                // surface-charge model and reduces hard |H|^2 ridges.
+                float pole_align = abs(dot(normal, dir));
+                float pole_face = shell_band * smoothstep(0.32, 0.90, pole_align);
+                M += dir * (obj.strength * u_source_scale * u_rigid_permanent_scale * pole_face);
+            } else if (u_include_soft != 0 && obj.mode == 2u && obj.susceptibility > 0.0) {
+                vec4 field = texture(u_prev_field_tex, uv);
+                float hmag = field.z;
+                if (hmag > 1e-5) {
+                    vec2 dir = normalize(field.xy + vec2(1e-6, 0.0));
+                    // Induced soft iron is also biased toward the shell and
+                    // pole faces. This makes it concentrate field without
+                    // feeding back as an overly strong volume source.
+                    float face_align = abs(dot(normal, dir));
+                    float face_focus = smoothstep(0.22, 0.86, face_align);
+                    float induced = langevin_response(hmag, obj.susceptibility * 0.30, 0.55);
+                    float shell_focus = shell_band * mix(0.35, 1.0, face_focus);
+                    M += dir * (induced * u_source_scale * u_rigid_soft_scale * shell_focus);
+                }
+            }
+        }
+    }
+
+    if (u_use_cursor != 0 && u_cursor_strength > 0.0 && u_cursor_falloff_radius > 1e-4) {
+        vec2 delta = world - u_cursor_pos;
+        float dist = length(delta);
+        float inner = max(u_cursor_inner_radius, 1e-4);
+        float outer = max(u_cursor_falloff_radius, inner);
+        if (dist < outer) {
+            vec2 dir = (length(u_cursor_dir) > 1e-6) ? normalize(u_cursor_dir) : vec2(0.0, 1.0);
+            vec2 tangent = vec2(-dir.y, dir.x);
+            float axial = dot(delta, dir);
+            float lateral_signed = dot(delta, tangent);
+            float lateral = abs(lateral_signed);
+            float mask = 0.0;
+
+            if (u_cursor_field_type == 1) {
+                // Classic symmetric bar magnet.
+                float half_len = outer * 0.78;
+                float axial_band = 1.0 - smoothstep(half_len * 0.48, half_len, abs(axial));
+                float width = mix(outer * 0.42, inner * 0.24, axial_band);
+                float lateral_band = exp(-pow(lateral / max(width, 1e-4), 2.2));
+                mask = axial_band * lateral_band;
+            } else if (u_cursor_field_type == 2) {
+                // Broad one-sided pole for stronger multi-peak ferro tests.
+                float front_len = inner * 0.72;
+                float back_len = outer * 1.00;
+                float front_gate = 1.0 - smoothstep(front_len * 0.35, front_len, axial);
+                float back_gate = smoothstep(-back_len, -back_len * 0.18, axial);
+                float axial_band = front_gate * back_gate;
+                if (axial_band > 1e-4) {
+                    float tip_focus = smoothstep(-back_len * 0.10, front_len * 0.92, axial);
+                    float width = mix(outer * 0.72, inner * 0.34, tip_focus);
+                    float lateral_band = exp(-pow(lateral / max(width, 1e-4), 2.0));
+                    mask = axial_band * lateral_band * mix(0.28, 1.0, tip_focus);
+                }
+            } else if (u_cursor_field_type == 3) {
+                // Two front poles with a shared rear return path.
+                float front_len = inner * 0.82;
+                float back_len = outer * 0.86;
+                float leg_gate = (1.0 - smoothstep(front_len * 0.28, front_len, axial)) *
+                                 smoothstep(-back_len, -back_len * 0.14, axial);
+                float leg_gap = inner * 0.44;
+                float leg_width = max(inner * 0.16, outer * 0.10);
+                float leg_l = exp(-pow(abs(lateral_signed - leg_gap) / max(leg_width, 1e-4), 2.4));
+                float leg_r = exp(-pow(abs(lateral_signed + leg_gap) / max(leg_width, 1e-4), 2.4));
+                float bridge_ax = exp(-pow((axial + back_len * 0.66) / max(inner * 0.42, 1e-4), 2.0));
+                float bridge_lat = exp(-pow(lateral / max(inner * 0.62, 1e-4), 2.0));
+                mask = leg_gate * (leg_l + leg_r) * 0.92 + 0.26 * bridge_ax * bridge_lat;
+            } else {
+                // Asymmetric probe pole: one dominant pole near the cursor
+                // with a broader, weaker return path behind it.
+                float front_len = inner * 0.58;
+                float back_len = outer * 0.92;
+                float front_gate = 1.0 - smoothstep(front_len * 0.28, front_len, axial);
+                float back_gate = smoothstep(-back_len, -back_len * 0.22, axial);
+                float axial_band = front_gate * back_gate;
+                if (axial_band > 1e-4) {
+                    float tip_focus = smoothstep(-back_len * 0.15, front_len * 0.92, axial);
+                    float body_width = mix(outer * 0.56, inner * 0.20, tip_focus);
+                    float lateral_band = exp(-pow(lateral / max(body_width, 1e-4), 2.4));
+                    mask = axial_band * lateral_band * mix(0.22, 1.0, tip_focus);
+                }
+            }
+
+            if (mask > 1e-4) {
+                M += dir * (u_cursor_strength * u_source_scale * mask);
+            }
+        }
+    }
+
+    imageStore(u_magnetization, pixel, vec4(M, 0.0, 0.0));
+}

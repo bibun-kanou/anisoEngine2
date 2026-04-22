@@ -1,0 +1,44 @@
+#version 450 core
+
+// MAC grid final BC: zero face velocities at solid boundaries
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) buffer VelV { float vel_v[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min, u_world_max;
+uniform int u_use_sdf;
+
+bool is_solid(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return true;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+    if (u_use_sdf == 0) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+
+    bool this_solid = is_solid(cell);
+
+    // u face: if either cell sharing this face is solid, zero u
+    if (this_solid || is_solid(cell + ivec2(-1, 0))) {
+        vel_u[idx] = 0.0;
+    }
+
+    // v face: if either cell sharing this face is solid, zero v
+    if (this_solid || is_solid(cell + ivec2(0, -1))) {
+        vel_v[idx] = 0.0;
+    }
+}

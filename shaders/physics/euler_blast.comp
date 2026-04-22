@@ -1,0 +1,59 @@
+#version 450 core
+
+// First-pass blast front for the Eulerian air grid.
+// This injects a traveling radial impulse ring plus a one-frame divergence
+// source so explosions feel more like a pressure pulse than a steady blower.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) buffer VelV { float vel_v[]; };
+layout(std430, binding = 66) buffer Temp { float air_temp[]; };
+layout(std430, binding = 68) buffer Smoke { float smoke[]; };
+layout(std430, binding = 70) buffer Vapor { float vapor[]; };
+layout(std430, binding = 72) buffer VaporSource { float vapor_source[]; };
+
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min;
+uniform vec2 u_pos;
+uniform float u_inner_radius;
+uniform float u_outer_radius;
+uniform float u_strength;
+uniform float u_heat;
+uniform float u_smoke;
+uniform float u_divergence;
+uniform float u_dt;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+    vec2 world_pos = u_world_min + (vec2(cell) + 0.5) * u_dx;
+    vec2 delta = world_pos - u_pos;
+    float dist = length(delta);
+    if (dist >= u_outer_radius) return;
+
+    float inner_r = clamp(u_inner_radius, 0.0, max(u_outer_radius - 1e-4, 0.0));
+    float ring_span = max(u_outer_radius - inner_r, u_outer_radius * 0.18);
+    float ring_center = mix(inner_r, u_outer_radius, 0.62);
+    float ring_sigma = max(ring_span * 0.28, u_dx * 1.5);
+    float ring_t = (dist - ring_center) / ring_sigma;
+    float ring = exp(-ring_t * ring_t);
+
+    float core = 1.0 - smoothstep(0.0, max(inner_r, u_outer_radius * 0.22), dist);
+    float outer_falloff = 1.0 - smoothstep(inner_r, u_outer_radius, dist);
+    float blast = max(ring, core * 0.28) * outer_falloff;
+    if (blast <= 1e-4) return;
+
+    vec2 dir = (dist > 1e-5) ? (delta / dist) : vec2(0.0, 1.0);
+    float shell_weight = max(ring, outer_falloff * 0.35);
+
+    vel_u[idx] += dir.x * u_strength * blast * u_dt;
+    vel_v[idx] += dir.y * u_strength * blast * u_dt;
+    air_temp[idx] += u_heat * (0.40 * core + shell_weight) * u_dt;
+    smoke[idx] = min(smoke[idx] + u_smoke * (0.18 * core + shell_weight) * u_dt, 4.0);
+    vapor[idx] = min(vapor[idx] + u_divergence * (0.10 * core + shell_weight) * u_dt, 4.0);
+    vapor_source[idx] = min(vapor_source[idx] + u_divergence * (0.30 * core + shell_weight), 8.0);
+}

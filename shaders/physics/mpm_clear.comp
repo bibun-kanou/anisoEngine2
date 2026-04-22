@@ -1,0 +1,23 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 40) buffer GridMass  { int   grid_mass[];  };
+layout(std430, binding = 41) buffer GridMomX  { int   grid_mom_x[]; };
+layout(std430, binding = 42) buffer GridMomY  { int   grid_mom_y[]; };
+layout(std430, binding = 43) buffer GridVelX  { float grid_vel_x[]; };
+layout(std430, binding = 44) buffer GridVelY  { float grid_vel_y[]; };
+layout(std430, binding = 55) buffer GridTempA { int   grid_temp_ato[]; };
+
+uniform uint u_grid_cells;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_grid_cells) return;
+    grid_mass[idx]  = 0;
+    grid_mom_x[idx] = 0;
+    grid_mom_y[idx] = 0;
+    grid_vel_x[idx] = 0.0;
+    grid_vel_y[idx] = 0.0;
+    grid_temp_ato[idx] = 0;
+}

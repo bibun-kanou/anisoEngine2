@@ -1,0 +1,47 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D u_magnetization_tex;
+layout(r32f, binding = 1) uniform image2D u_source_tex;
+
+uniform ivec2 u_resolution;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+
+vec2 sample_M(ivec2 px) {
+    px = clamp(px, ivec2(0), u_resolution - ivec2(1));
+    return texelFetch(u_magnetization_tex, px, 0).xy;
+}
+
+vec2 sample_M_smooth(ivec2 px) {
+    vec2 c  = sample_M(px) * 0.36;
+    vec2 ax = (sample_M(px + ivec2( 1, 0)) + sample_M(px + ivec2(-1, 0)) +
+               sample_M(px + ivec2( 0, 1)) + sample_M(px + ivec2( 0,-1))) * 0.11;
+    vec2 dg = (sample_M(px + ivec2( 1, 1)) + sample_M(px + ivec2(-1, 1)) +
+               sample_M(px + ivec2( 1,-1)) + sample_M(px + ivec2(-1,-1))) * 0.05;
+    return c + ax + dg;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+
+    vec2 dx = (u_world_max - u_world_min) / vec2(u_resolution);
+    float inv2dx = 0.5 / max(dx.x, 1e-5);
+    float inv2dy = 0.5 / max(dx.y, 1e-5);
+
+    vec2 Ml = sample_M_smooth(pixel + ivec2(-1, 0));
+    vec2 Mr = sample_M_smooth(pixel + ivec2( 1, 0));
+    vec2 Mb = sample_M_smooth(pixel + ivec2(0, -1));
+    vec2 Mt = sample_M_smooth(pixel + ivec2(0,  1));
+
+    // Magnetostatics: from div(B) = 0 and B = mu0(H + M), H = -grad(phi),
+    // we get Laplacian(phi) = div(M). The cursor is NOT injected here —
+    // it enters via the rasterize pass as a vector magnetization (dragged bar magnet),
+    // so its contribution appears naturally in divM.
+    float divM = (Mr.x - Ml.x) * inv2dx + (Mt.y - Mb.y) * inv2dy;
+    float source = divM;
+
+    imageStore(u_source_tex, pixel, vec4(source, 0.0, 0.0, 0.0));
+}

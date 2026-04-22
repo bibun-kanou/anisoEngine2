@@ -1,0 +1,106 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 6) readonly buffer TempBuffer { float temperatures[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+
+layout(std430, binding = 19) coherent buffer ParticleMagX { int accum_x[]; };
+layout(std430, binding = 20) coherent buffer ParticleMagY { int accum_y[]; };
+layout(std430, binding = 21) coherent buffer ParticleOcc { int accum_occ[]; };
+
+layout(binding = 0) uniform sampler2D u_prev_field_tex;
+
+uniform uint u_offset;
+uniform uint u_count;
+uniform ivec2 u_resolution;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+uniform float u_source_scale;
+
+const uint MAT_FERRO_FLUID = 31u;
+const uint MAT_MAG_SOFT_IRON = 57u;
+const uint MAT_MAGNETIC_RUBBER = 58u;
+const float FIXED_SCALE = 256.0;
+
+float langevin_response(float hmag, float saturation, float alpha) {
+    float x = max(alpha * hmag, 1e-4);
+    float L = (x < 0.12) ? (x / 3.0) : (1.0 / tanh(x) - 1.0 / x);
+    return saturation * clamp(L, 0.0, 1.0);
+}
+
+vec4 sample_field(vec2 pos) {
+    vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0);
+    return texture(u_prev_field_tex, uv);
+}
+
+void atomic_add_sample(ivec2 pixel, vec2 M, float weight) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+    uint cell = uint(pixel.y * u_resolution.x + pixel.x);
+    int add_x = int(round(M.x * weight * FIXED_SCALE));
+    int add_y = int(round(M.y * weight * FIXED_SCALE));
+    if (add_x != 0) atomicAdd(accum_x[cell], add_x);
+    if (add_y != 0) atomicAdd(accum_y[cell], add_y);
+}
+
+void atomic_add_occ(ivec2 pixel, float weight) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+    uint cell = uint(pixel.y * u_resolution.x + pixel.x);
+    int add_occ = int(round(weight * FIXED_SCALE));
+    if (add_occ != 0) atomicAdd(accum_occ[cell], add_occ);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    uint mat = material_ids[p];
+    if (mat != MAT_FERRO_FLUID && mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER) return;
+
+    vec2 pos = positions[p];
+    vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return;
+
+    vec4 field = sample_field(pos);
+    float hmag = field.z;
+    if (hmag <= 1e-5) return;
+
+    vec2 dir = normalize(field.xy + vec2(1e-6, 0.0));
+    float temp = temperatures[p];
+
+    float saturation = 0.0;
+    float alpha = 0.0;
+    if (mat == MAT_FERRO_FLUID) {
+        saturation = 3.8;
+        alpha = 1.0 * mix(1.0, 0.72, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
+    } else if (mat == MAT_MAG_SOFT_IRON) {
+        saturation = 11.0;
+        alpha = 1.5;
+    } else {
+        saturation = 6.2;
+        alpha = 1.15;
+    }
+
+    float induced = langevin_response(hmag, saturation, alpha);
+    if (induced <= 1e-5) return;
+    vec2 M = dir * (induced * u_source_scale);
+
+    vec2 texel = uv * vec2(u_resolution) - vec2(0.5);
+    ivec2 base = ivec2(floor(texel));
+    vec2 f = fract(texel);
+
+    atomic_add_sample(base + ivec2(0, 0), M, (1.0 - f.x) * (1.0 - f.y));
+    atomic_add_sample(base + ivec2(1, 0), M, f.x * (1.0 - f.y));
+    atomic_add_sample(base + ivec2(0, 1), M, (1.0 - f.x) * f.y);
+    atomic_add_sample(base + ivec2(1, 1), M, f.x * f.y);
+
+    if (mat == MAT_FERRO_FLUID) {
+        atomic_add_occ(base + ivec2(0, 0), (1.0 - f.x) * (1.0 - f.y));
+        atomic_add_occ(base + ivec2(1, 0), f.x * (1.0 - f.y));
+        atomic_add_occ(base + ivec2(0, 1), (1.0 - f.x) * f.y);
+        atomic_add_occ(base + ivec2(1, 1), f.x * f.y);
+    }
+}

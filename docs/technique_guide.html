@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Noita-Gish Technique Guide</title>
+  <style>
+    :root {
+      --bg: #120d0c;
+      --panel: rgba(28, 21, 19, 0.8);
+      --panel-2: rgba(42, 31, 27, 0.82);
+      --line: rgba(255, 212, 173, 0.14);
+      --text: #f8ede4;
+      --muted: #cfb9a9;
+      --warm: #ff8c42;
+      --hot: #ff5533;
+      --gold: #f5c77b;
+      --steel: #b9c4cf;
+      --cool: #7fc9e7;
+      --green: #99d8a5;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      --radius: 22px;
+      --maxw: 1320px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Trebuchet MS", "Helvetica Neue", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 10%, rgba(255, 120, 60, 0.22), transparent 26%),
+        radial-gradient(circle at 85% 18%, rgba(255, 195, 120, 0.14), transparent 24%),
+        radial-gradient(circle at 72% 78%, rgba(110, 185, 210, 0.14), transparent 22%),
+        linear-gradient(180deg, #1a1110 0%, #120d0c 50%, #0f0b0a 100%);
+      line-height: 1.55;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .shell {
+      width: min(var(--maxw), calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 80px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      padding: 36px;
+      background:
+        linear-gradient(135deg, rgba(255, 102, 51, 0.18), rgba(255, 166, 77, 0.08) 38%, rgba(127, 201, 231, 0.08) 100%),
+        rgba(22, 16, 14, 0.78);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -10% -35% 45%;
+      height: 280px;
+      background: radial-gradient(circle, rgba(255, 140, 66, 0.22), transparent 70%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(255, 140, 66, 0.12);
+      border: 1px solid rgba(255, 184, 133, 0.18);
+      color: var(--gold);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 {
+      margin: 0 0 14px;
+      line-height: 1.08;
+      font-weight: 750;
+      letter-spacing: -0.03em;
+    }
+
+    h1 {
+      margin-top: 18px;
+      font-size: clamp(2.4rem, 6vw, 5.2rem);
+      max-width: 10ch;
+    }
+
+    h2 {
+      font-size: clamp(1.6rem, 3vw, 2.4rem);
+    }
+
+    h3 {
+      font-size: 1.18rem;
+    }
+
+    p {
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 28px;
+      align-items: end;
+      margin-top: 18px;
+    }
+
+    .hero-copy p {
+      max-width: 62ch;
+      font-size: 1.03rem;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .chip {
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font-size: 0.92rem;
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 14px;
+    }
+
+    .metric {
+      padding: 18px 18px 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 1.8rem;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .nav {
+      position: sticky;
+      top: 14px;
+      z-index: 5;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 18px 0 28px;
+      padding: 12px;
+      border-radius: 18px;
+      background: rgba(20, 15, 13, 0.72);
+      border: 1px solid var(--line);
+      backdrop-filter: blur(12px);
+    }
+
+    .nav a {
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-size: 0.92rem;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid transparent;
+    }
+
+    .nav a:hover {
+      color: var(--text);
+      border-color: var(--line);
+    }
+
+    section {
+      margin-top: 42px;
+      padding: 28px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      box-shadow: var(--shadow);
+    }
+
+    .section-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+
+    .section-top p {
+      max-width: 62ch;
+      margin-bottom: 0;
+    }
+
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .card {
+      grid-column: span 4;
+      padding: 20px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.035);
+      min-height: 100%;
+    }
+
+    .card.tall {
+      grid-column: span 6;
+    }
+
+    .card.full {
+      grid-column: 1 / -1;
+    }
+
+    .kicker {
+      color: var(--gold);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+    }
+
+    .bullet-list {
+      margin: 14px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    .bullet-list li + li {
+      margin-top: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      overflow: hidden;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    th, td {
+      text-align: left;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--gold);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    code {
+      font-family: Consolas, "SFMono-Regular", monospace;
+      padding: 0.1em 0.38em;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      color: #ffe9d4;
+    }
+
+    .diagram {
+      margin-top: 18px;
+      padding: 20px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(255, 140, 66, 0.08), rgba(127, 201, 231, 0.05)),
+        rgba(255, 255, 255, 0.03);
+    }
+
+    .diagram svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .roadmap-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .roadmap {
+      padding: 20px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.035);
+    }
+
+    .heatbar {
+      margin-top: 16px;
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      overflow: hidden;
+      border: 1px solid var(--line);
+    }
+
+    .heatbar span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #72321f, #ff7f42, #ffd08a);
+    }
+
+    .priority {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .priority:last-child {
+      border-bottom: none;
+    }
+
+    .priority-index {
+      flex: 0 0 auto;
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: rgba(255, 140, 66, 0.14);
+      color: var(--gold);
+      font-weight: 700;
+    }
+
+    .footer-note {
+      margin-top: 26px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .roadmap-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .card,
+      .card.tall {
+        grid-column: 1 / -1;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        width: min(var(--maxw), calc(100% - 18px));
+      }
+
+      .hero,
+      section {
+        padding: 20px;
+        border-radius: 20px;
+      }
+
+      th, td {
+        padding: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="eyebrow">Noita-Gish / Techniques / Heat-Driven Materials</div>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <h1>Technique Guide and Thermal Material Roadmap</h1>
+          <p>
+            This document is both a current-state atlas and a design deck for where the simulation can go next.
+            The strongest axis in the project right now is already heating, cooling, curing, softening, burning,
+            and gas-driven motion. The next step is to make temperature not just a color or stiffness modifier,
+            but a source of internal stress, layered transformation, gas generation, and structural memory.
+          </p>
+          <div class="chip-row">
+            <span class="chip">SPH fluids</span>
+            <span class="chip">MPM solids / thermal materials</span>
+            <span class="chip">Eulerian air + smoke</span>
+            <span class="chip">SDF heated metal geometry</span>
+            <span class="chip">Open oven / pot heater scenes</span>
+          </div>
+        </div>
+        <div class="hero-side">
+          <div class="metric">
+            <strong>4</strong>
+            <span>Major simulation layers interacting in one world</span>
+          </div>
+          <div class="metric">
+            <strong>Heat</strong>
+            <span>The current most expressive axis for future materials and scene design</span>
+          </div>
+          <div class="metric">
+            <strong>Next leap</strong>
+            <span>Thermal stress, layered surfaces, gas generation, and multi-phase microstructure</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <nav class="nav">
+      <a href="#systems">Current Systems</a>
+      <a href="#materials">Material Atlas</a>
+      <a href="#scenes">Scene Guide</a>
+      <a href="#gaps">Missing Techniques</a>
+      <a href="#priorities">Best Next Adds</a>
+      <a href="#glass">Glass Note</a>
+    </nav>
+
+    <section id="systems">
+      <div class="section-top">
+        <div>
+          <h2>Current Simulation Stack</h2>
+          <p>The project is already strongest when multiple representations overlap: deformable MPM matter, SPH liquid, hot buoyant air, and conductive rigid SDF walls.</p>
+        </div>
+      </div>
+
+      <div class="diagram">
+        <svg viewBox="0 0 1180 360" aria-label="System interaction diagram">
+          <defs>
+            <linearGradient id="warmGrad" x1="0%" x2="100%">
+              <stop offset="0%" stop-color="#ff6c3c"/>
+              <stop offset="100%" stop-color="#ffbe73"/>
+            </linearGradient>
+            <linearGradient id="coolGrad" x1="0%" x2="100%">
+              <stop offset="0%" stop-color="#5ea5c7"/>
+              <stop offset="100%" stop-color="#9bd7ef"/>
+            </linearGradient>
+          </defs>
+          <rect x="60" y="120" width="220" height="110" rx="28" fill="rgba(255,255,255,0.04)" stroke="rgba(255,212,173,0.18)"/>
+          <rect x="330" y="52" width="260" height="110" rx="28" fill="rgba(255,255,255,0.04)" stroke="rgba(255,212,173,0.18)"/>
+          <rect x="330" y="202" width="260" height="110" rx="28" fill="rgba(255,255,255,0.04)" stroke="rgba(255,212,173,0.18)"/>
+          <rect x="650" y="120" width="220" height="110" rx="28" fill="rgba(255,255,255,0.04)" stroke="rgba(255,212,173,0.18)"/>
+          <rect x="920" y="120" width="200" height="110" rx="28" fill="rgba(255,255,255,0.04)" stroke="rgba(255,212,173,0.18)"/>
+
+          <text x="170" y="172" text-anchor="middle" fill="#f8ede4" font-size="26" font-weight="700">SPH Fluids</text>
+          <text x="170" y="202" text-anchor="middle" fill="#cfb9a9" font-size="16">Splash, drip, codim threads</text>
+
+          <text x="460" y="104" text-anchor="middle" fill="#f8ede4" font-size="26" font-weight="700">MPM Solids</text>
+          <text x="460" y="134" text-anchor="middle" fill="#cfb9a9" font-size="16">Curing, fracture, burning, glass, foam</text>
+
+          <text x="460" y="254" text-anchor="middle" fill="#f8ede4" font-size="26" font-weight="700">Eulerian Air</text>
+          <text x="460" y="284" text-anchor="middle" fill="#cfb9a9" font-size="16">Buoyancy, smoke, wind, temperature</text>
+
+          <text x="760" y="172" text-anchor="middle" fill="#f8ede4" font-size="26" font-weight="700">SDF Rigids</text>
+          <text x="760" y="202" text-anchor="middle" fill="#cfb9a9" font-size="16">Walls, ovens, pots, heated metal</text>
+
+          <text x="1020" y="172" text-anchor="middle" fill="#f8ede4" font-size="26" font-weight="700">Scenes</text>
+          <text x="1020" y="202" text-anchor="middle" fill="#cfb9a9" font-size="16">Ovens, wind tunnels, forge tests</text>
+
+          <path d="M280 175 C305 175 305 110 330 110" fill="none" stroke="url(#warmGrad)" stroke-width="5"/>
+          <path d="M280 175 C305 175 305 250 330 250" fill="none" stroke="url(#coolGrad)" stroke-width="5"/>
+          <path d="M590 110 C620 110 620 175 650 175" fill="none" stroke="url(#warmGrad)" stroke-width="5"/>
+          <path d="M590 250 C620 250 620 175 650 175" fill="none" stroke="url(#coolGrad)" stroke-width="5"/>
+          <path d="M870 175 C895 175 895 175 920 175" fill="none" stroke="url(#warmGrad)" stroke-width="5"/>
+
+          <text x="306" y="146" fill="#ffd59d" font-size="14">impacts / overlap</text>
+          <text x="304" y="237" fill="#9bd7ef" font-size="14">drag / entrainment</text>
+          <text x="604" y="141" fill="#ffd59d" font-size="14">collision + heat</text>
+          <text x="603" y="233" fill="#9bd7ef" font-size="14">air-solid coupling</text>
+        </svg>
+      </div>
+
+      <div class="card-grid">
+        <article class="card">
+          <div class="kicker">SPH</div>
+          <h3>Thin-fluid and free-surface motion</h3>
+          <p>Best for water-like behavior, splashes, drips, filaments, and codimensional flow through narrow gaps.</p>
+          <ul class="bullet-list">
+            <li>WCSPH pressure and XSPH smoothing</li>
+            <li>Surface tension and codim thread detection</li>
+            <li>Works especially well in <code>Dam Break</code> and <code>Codim Threads</code></li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <div class="kicker">MPM</div>
+          <h3>Most expressive material sandbox</h3>
+          <p>Already supports curing, glass-like softening, fracture, fiber anisotropy, burning, embers, porosity, and hot-fluid oddities.</p>
+          <ul class="bullet-list">
+            <li>Corotated elastic, snow plasticity, phase transitions</li>
+            <li>Damage and crack accumulation</li>
+            <li>Heat-reactive presets are the strongest current content</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <div class="kicker">Eulerian Air</div>
+          <h3>Where fire becomes visible</h3>
+          <p>Smoke, buoyancy, wind, thermal diffusion, and drag make heated matter feel alive instead of just color-shifting in place.</p>
+          <ul class="bullet-list">
+            <li>Rightward wind scenes already help separate combustion from airflow</li>
+            <li>Air is the path toward oxidizer-limited burning and pressure-driven events</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="materials">
+      <div class="section-top">
+        <div>
+          <h2>Material Atlas</h2>
+          <p>These are the most interesting current heat-first material families and what they are trying to show.</p>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Family</th>
+            <th>Examples</th>
+            <th>What it demonstrates</th>
+            <th>What to expect</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Glass-like</td>
+            <td><code>Glass [experimental]</code>, <code>Tempered Glass [experimental]</code>, <code>Hot Glass [experimental]</code></td>
+            <td>Reversible soften / reharden behavior</td>
+            <td>Should stay rigid when cool, get viscous only in a hotter band, then recover stiffness on cooling</td>
+          </tr>
+          <tr>
+            <td>Ceramic / kiln</td>
+            <td><code>Terracotta</code>, <code>Porcelain</code>, <code>Bloom Clay [new]</code>, <code>Kiln Reed [new][experimental]</code>, <code>Puff Clay [new][experimental]</code></td>
+            <td>Curing, firing, cracking, shell-like hot fracture</td>
+            <td>Hardening first, then chunking, petal breakup, or grain-guided splintering</td>
+          </tr>
+          <tr>
+            <td>Fiber and wood-like</td>
+            <td><code>Soft Wood</code>, <code>Hard Wood</code>, <code>Fiber</code>, <code>Rope</code>, <code>Bamboo</code>, <code>Bone</code></td>
+            <td>Anisotropy and heat-weakened structure</td>
+            <td>Different failure along versus across grain, with more visible heat-driven weakening than before</td>
+          </tr>
+          <tr>
+            <td>Gas-forming / porous</td>
+            <td><code>Bread Dough [new][experimental]</code>, <code>Puff Clay [new][experimental]</code>, <code>Intumescent Block [new][experimental]</code></td>
+            <td>Expansion, pore growth, softening</td>
+            <td>Ranges from dough-like puffing to cured clay swelling to hot porous foam, with pressure now able to tear or crumble the body</td>
+          </tr>
+          <tr>
+            <td>Burning / reactive</td>
+            <td><code>Lamp Oil [new]</code>, <code>Firecracker Pellet [new][experimental]</code>, <code>Wood Log</code>, <code>Paper</code>, <code>Coal</code>, <code>Embers</code></td>
+            <td>Combustion, smoke injection, buoyant hot debris</td>
+            <td>Ignition, smoke, hot plume behavior, weakening as burn state progresses, and first-pass pressure bursts for reactive pellets</td>
+          </tr>
+        </tbody>
+      </table>
+      <p><code>[new]</code> marks recent additions. <code>[experimental]</code> marks first-pass behaviors that are intentionally visible before they are fully tuned.</p>
+    </section>
+
+    <section id="scenes">
+      <div class="section-top">
+        <div>
+          <h2>Best Current Scene Setups</h2>
+          <p>The new oven and pot scenes are especially good for heat/cooling experiments because they create stronger thermal asymmetry than the generic sandbox.</p>
+        </div>
+      </div>
+
+      <div class="card-grid">
+        <article class="card tall">
+          <div class="kicker">Open chamber</div>
+          <h3>Open Oven / Open Oven + Wind</h3>
+          <p>Good for observing heated wall glow, escaping plumes, directional draft, and uneven heating on suspended or shelved materials.</p>
+          <div class="heatbar"><span style="width: 84%"></span></div>
+        </article>
+
+        <article class="card tall">
+          <div class="kicker">Heater below, vessel above</div>
+          <h3>Pot Heater / Pot Heater + Wind</h3>
+          <p>Good for testing heat transmission through rigid structure into a second chamber or pot-like space, especially with fluids or foam-like matter.</p>
+          <div class="heatbar"><span style="width: 88%"></span></div>
+        </article>
+
+        <article class="card">
+          <div class="kicker">Airflow readout</div>
+          <h3>Wind Tunnel</h3>
+          <p>Best for separating pure flow effects from thermal reactions.</p>
+        </article>
+
+        <article class="card">
+          <div class="kicker">Fracture test</div>
+          <h3>Drop Ball + heated materials</h3>
+          <p>The new hard-ball tool makes repeatable before/after-heating impact tests much easier.</p>
+        </article>
+
+        <article class="card">
+          <div class="kicker">Thermal benchmark</div>
+          <h3>Heat Ramp and Fire &amp; Forge</h3>
+          <p>Still useful for simple progression tests: heat while moving, burn while rising, or cure near a source.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="gaps">
+      <div class="section-top">
+        <div>
+          <h2>Missing Techniques for a Heat-First Material Sandbox</h2>
+          <p>The missing pieces are less about adding many unrelated solvers and more about adding the right hidden state fields.</p>
+        </div>
+      </div>
+
+      <div class="roadmap-grid">
+        <article class="roadmap">
+          <div class="kicker">1. Metal</div>
+          <h3>Thermal stress, constrained expansion, and treatment history</h3>
+          <p>For convincing hot metal, temperature must generate internal stress, not just a change in stiffness.</p>
+          <ul class="bullet-list">
+            <li>Thermoelastic stress accumulation</li>
+            <li>Boundary-constrained expansion and contraction</li>
+            <li>Plasticity versus annealing split</li>
+            <li>Transformation / quench hardening state</li>
+          </ul>
+        </article>
+
+        <article class="roadmap">
+          <div class="kicker">2. Pottery</div>
+          <h3>Layered shell behavior and glaze</h3>
+          <p>Pottery becomes much richer once the surface and interior are allowed to mature differently.</p>
+          <ul class="bullet-list">
+            <li>Surface-only glaze phase</li>
+            <li>Sintering gradient through thickness</li>
+            <li>Outer-shell shrink / inner-core mismatch</li>
+            <li>Moisture burnout before final hardening</li>
+          </ul>
+        </article>
+
+        <article class="roadmap">
+          <div class="kicker">3. Baking</div>
+          <h3>Gas generation inside a soft viscoelastic matrix</h3>
+          <p>Bread-like behavior needs expanding gas inside something that stretches and then sets.</p>
+          <ul class="bullet-list">
+            <li>Gas source term from heat / reaction</li>
+            <li>Viscoelastic dough-like deformation</li>
+            <li>Crust formation at the surface</li>
+            <li>Moisture and steam coupling</li>
+          </ul>
+        </article>
+
+        <article class="roadmap">
+          <div class="kicker">4. Burning</div>
+          <h3>Bursting, popping, and oxidizer-aware combustion</h3>
+          <p>Current fire is already visually useful, but the big missing jump is pressure and staged reaction.</p>
+          <ul class="bullet-list">
+            <li>Pressure-driven rupture / firecracker events</li>
+            <li>Oxidizer-limited burning</li>
+            <li>Fragment and spark ejection</li>
+            <li>Pyrolysis gas versus char versus ash phases</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="card-grid">
+        <article class="card full">
+          <div class="kicker">5. Compound and microstructured materials</div>
+          <h3>What unlocks the weirdest and most convincing behaviors</h3>
+          <p>
+            The long-term route to concrete, laminated shells, better bone, smarter bamboo, glazed pottery,
+            puffed bread, and treated metal is a small set of extra internal fields rather than a giant set of hardcoded presets.
+          </p>
+          <ul class="bullet-list">
+            <li><strong>Shell-core state:</strong> surface and interior can react differently</li>
+            <li><strong>Gas / pore fraction:</strong> expansion, bubbling, bursting, fluffiness</li>
+            <li><strong>Moisture / volatile content:</strong> burnout, steam, glaze, crust</li>
+            <li><strong>Microstructure phase:</strong> treatment history matters after cooling</li>
+            <li><strong>Orientation field:</strong> richer grain than a single fiber vector</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="priorities">
+      <div class="section-top">
+        <div>
+          <h2>Best Next Adds</h2>
+          <p>If the main goal is that heating and cooling remain the most interesting axis in the sim, these are the highest-value additions.</p>
+        </div>
+      </div>
+
+      <div class="card full">
+        <div class="priority">
+          <div class="priority-index">1</div>
+          <div>
+            <h3>Thermoelastic stress and constrained expansion</h3>
+            <p>This is the missing foundation for convincing hot metal, better ceramic cracking, and more realistic glass failure.</p>
+          </div>
+        </div>
+        <div class="priority">
+          <div class="priority-index">2</div>
+          <div>
+            <h3>Layered surface/interior state</h3>
+            <p>This unlocks glaze, crust, case-hardening, shell-core fracture, and a lot of kiln / baking behavior in one move.</p>
+          </div>
+        </div>
+        <div class="priority">
+          <div class="priority-index">3</div>
+          <div>
+            <h3>Gas-generation field coupled to a soft matrix</h3>
+            <p>This now has a first-pass prototype in <code>Bread Dough [new][experimental]</code> and <code>Puff Clay [new][experimental]</code>, and it is the bridge from intumescent behavior to true bread, puffing, bubbling, and burst-driven combustion effects.</p>
+          </div>
+        </div>
+        <div class="priority">
+          <div class="priority-index">4</div>
+          <div>
+            <h3>Reactive burst / fragmentation events</h3>
+            <p>This now has a first-pass prototype in <code>Firecracker Pellet [new][experimental]</code>. Once local pressure can rupture a body, firecrackers, popping resins, seeds, and brittle explosive ceramics all become possible.</p>
+          </div>
+        </div>
+        <div class="priority">
+          <div class="priority-index">5</div>
+          <div>
+            <h3>Multi-phase microstructure state</h3>
+            <p>This is the long-term route to materials whose behavior depends on how they were heated, cooled, coated, baked, or forged.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="glass">
+      <div class="section-top">
+        <div>
+          <h2>Why Glass Still Collapses Too Easily</h2>
+          <p>The current glass model is already more interesting than before, but it still behaves closer to a hot viscoelastic body than a brittle network with strong residual structural memory.</p>
+        </div>
+      </div>
+
+      <div class="card-grid">
+        <article class="card tall">
+          <div class="kicker">Likely missing ingredients</div>
+          <ul class="bullet-list">
+            <li>A stronger cold-state shear modulus floor</li>
+            <li>Slower deformation-memory reset in the hot range</li>
+            <li>Thermal stress from uneven heating and cooling</li>
+            <li>A cleaner distinction between sagging and full flow</li>
+          </ul>
+        </article>
+
+        <article class="card tall">
+          <div class="kicker">Most useful next glass-specific change</div>
+          <h3>Glass transition plus annealing stress</h3>
+          <p>
+            The best next step is probably not another preset, but a better temperature-history model:
+            hot enough to relax some stress, cool enough to reharden, and different outcomes depending on how quickly the body cools.
+          </p>
+        </article>
+      </div>
+
+      <p class="footer-note">
+        Companion markdown version: <code>docs/technique_guide.md</code>. This HTML page is meant to be browsed directly in a local browser as a visual design/reference document.
+      </p>
+    </section>
+  </div>
+</body>
+</html>

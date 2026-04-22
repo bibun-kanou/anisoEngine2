@@ -1,0 +1,352 @@
+#version 450 core
+
+// Inject heat/velocity/smoke from particles into MAC grid
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 1) readonly buffer VelocityBuffer { vec2 velocities[]; };
+layout(std430, binding = 6) readonly buffer TempBuffer { float temperatures[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+layout(std430, binding = 49) readonly buffer DamageBuf { float damage[]; };
+layout(std430, binding = 50) readonly buffer PhaseBuf { float phase_data[]; };
+layout(std430, binding = 54) readonly buffer ThermalCouplingBuf { vec4 thermal_coupling[]; };
+
+layout(std430, binding = 60) buffer VelU { float vel_u[]; };
+layout(std430, binding = 61) buffer VelV { float vel_v[]; };
+layout(std430, binding = 66) buffer Temp { float air_temp[]; };
+layout(std430, binding = 68) buffer Smoke { float smoke[]; };
+layout(std430, binding = 70) buffer Vapor { float vapor[]; };
+layout(std430, binding = 72) buffer VaporSource { float vapor_source[]; };
+layout(std430, binding = 83) buffer AutomataField { float automata_field[]; };
+layout(std430, binding = 85) buffer BioSupportSource { float bio_support_source[]; };
+layout(std430, binding = 88) buffer BioSourceSeed { float bio_source_seed[]; };
+
+layout(binding = 0) uniform sampler2D u_airtight_outside_tex;
+
+uniform uint u_offset, u_count;
+uniform ivec2 u_res;
+uniform float u_dx, u_dt;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+uniform float u_ambient_temp;
+uniform float u_vapor_generation;
+uniform float u_latent_cooling;
+uniform float u_combustion_heat_boost;
+uniform int u_use_airtight_mask;
+uniform int u_use_bio;
+uniform float u_bio_seed_strength;
+uniform int u_use_automata;
+uniform float u_automata_seed_strength;
+
+float sample_airtight_outside(vec2 world_pos) {
+    if (u_use_airtight_mask == 0) return 1.0;
+    vec2 uv = (world_pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    return clamp(texture(u_airtight_outside_tex, uv).r, 0.0, 1.0);
+}
+
+void splat_bio_seed(vec2 grid_pos, float amount) {
+    if (amount <= 0.0) return;
+    ivec2 c0 = ivec2(floor(grid_pos));
+    ivec2 c1 = c0 + ivec2(1);
+    vec2 f = fract(grid_pos);
+    float w00 = (1.0 - f.x) * (1.0 - f.y);
+    float w10 = f.x * (1.0 - f.y);
+    float w01 = (1.0 - f.x) * f.y;
+    float w11 = f.x * f.y;
+    uint i00 = uint(c0.y * u_res.x + c0.x);
+    uint i10 = uint(c0.y * u_res.x + c1.x);
+    uint i01 = uint(c1.y * u_res.x + c0.x);
+    uint i11 = uint(c1.y * u_res.x + c1.x);
+    bio_source_seed[i00] = min(bio_source_seed[i00] + amount * w00, 4.0);
+    bio_source_seed[i10] = min(bio_source_seed[i10] + amount * w10, 4.0);
+    bio_source_seed[i01] = min(bio_source_seed[i01] + amount * w01, 4.0);
+    bio_source_seed[i11] = min(bio_source_seed[i11] + amount * w11, 4.0);
+}
+
+void splat_support_seed(vec2 grid_pos, float amount) {
+    if (amount <= 0.0) return;
+    ivec2 c0 = ivec2(floor(grid_pos));
+    ivec2 c1 = c0 + ivec2(1);
+    vec2 f = fract(grid_pos);
+    float w00 = (1.0 - f.x) * (1.0 - f.y);
+    float w10 = f.x * (1.0 - f.y);
+    float w01 = (1.0 - f.x) * f.y;
+    float w11 = f.x * f.y;
+    uint i00 = uint(c0.y * u_res.x + c0.x);
+    uint i10 = uint(c0.y * u_res.x + c1.x);
+    uint i01 = uint(c1.y * u_res.x + c0.x);
+    uint i11 = uint(c1.y * u_res.x + c1.x);
+    bio_support_source[i00] = min(bio_support_source[i00] + amount * w00, 3.0);
+    bio_support_source[i10] = min(bio_support_source[i10] + amount * w10, 3.0);
+    bio_support_source[i01] = min(bio_support_source[i01] + amount * w01, 3.0);
+    bio_support_source[i11] = min(bio_support_source[i11] + amount * w11, 3.0);
+}
+
+void splat_automata_seed(vec2 grid_pos, float amount) {
+    if (amount <= 0.0) return;
+    ivec2 c0 = ivec2(floor(grid_pos));
+    ivec2 c1 = c0 + ivec2(1);
+    vec2 f = fract(grid_pos);
+    float w00 = (1.0 - f.x) * (1.0 - f.y);
+    float w10 = f.x * (1.0 - f.y);
+    float w01 = (1.0 - f.x) * f.y;
+    float w11 = f.x * f.y;
+    uint i00 = uint(c0.y * u_res.x + c0.x);
+    uint i10 = uint(c0.y * u_res.x + c1.x);
+    uint i01 = uint(c1.y * u_res.x + c0.x);
+    uint i11 = uint(c1.y * u_res.x + c1.x);
+    automata_field[i00] = clamp(automata_field[i00] + amount * w00, 0.0, 1.0);
+    automata_field[i10] = clamp(automata_field[i10] + amount * w10, 0.0, 1.0);
+    automata_field[i01] = clamp(automata_field[i01] + amount * w01, 0.0, 1.0);
+    automata_field[i11] = clamp(automata_field[i11] + amount * w11, 0.0, 1.0);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    vec2 pos = positions[p];
+    vec2 vel = velocities[p];
+    float temp = temperatures[p];
+    uint mat = material_ids[p];
+    float live_seed_gate = 1.0;
+    float scaffold_seed_gate = 1.0;
+    float cool_seed_gate = 0.0;
+    float dormant_seed_gate = 0.0;
+
+    if (mat == 66u) {
+        float regrow = clamp(damage[idx], 0.0, 1.0);
+        float ash = clamp(phase_data[idx], 0.0, 1.0);
+        cool_seed_gate = 1.0 - smoothstep(338.0, 392.0, temp);
+        float heat_lock = smoothstep(360.0, 520.0, temp);
+        scaffold_seed_gate = clamp(max(regrow * 0.26, ash * mix(1.0, 0.30, heat_lock)), 0.0, 1.0);
+        dormant_seed_gate = clamp(ash * cool_seed_gate * (0.24 + 0.76 * scaffold_seed_gate) * (1.0 - 0.55 * heat_lock), 0.0, 1.0);
+        live_seed_gate = clamp(max(regrow, dormant_seed_gate * 0.18) * cool_seed_gate * (1.0 - 0.42 * ash), 0.0, 1.0);
+    }
+
+    vec2 grid_pos = (pos - u_world_min) / u_dx;
+    ivec2 cell = ivec2(floor(grid_pos));
+
+    if (cell.x < 1 || cell.y < 1 || cell.x >= u_res.x - 1 || cell.y >= u_res.y - 1)
+        return;
+
+    float emit_threshold = 400.0;
+    if (mat == 54u) emit_threshold = 370.0;      // boiling water
+    else if (mat == 55u) emit_threshold = 340.0; // thermal syrup
+    else if (mat == 53u) emit_threshold = 340.0; // burning oil
+    else if (mat == 56u) emit_threshold = 335.0; // flash fluid
+    // Keep the low-temperature path alive so bio / automata seeding can happen
+    // even before a material is visibly hot enough to vent smoke or vapor.
+
+    float emit_gate = smoothstep(emit_threshold - 25.0, emit_threshold + 10.0, temp);
+    float heat_factor = clamp((temp - 350.0) / 500.0, 0.0, 1.0) * emit_gate;
+    float dT = temp - u_ambient_temp;
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    float outside_mask = sample_airtight_outside(pos);
+    float trapped_mask = 1.0 - outside_mask;
+    float air_exchange = mix(1.0, outside_mask, smoothstep(0.10, 0.85, trapped_mask));
+    float batch_outgas = max(thermal_coupling[idx].x, 0.0);
+    float batch_heat = max(thermal_coupling[idx].y, 0.0);
+    float vapor_scale = 0.0;
+    float heat_scale = 0.08;
+    float combustion_scale = 0.0;
+    float latent_relief = 1.0;
+
+    // Moist / gas-generating materials vent noticeably, while metals, ceramics,
+    // glass, and ordinary solids mostly just heat nearby air.
+    if (mat == 19u || mat == 23u || mat == 27u) { // bread / crust / bun
+        vapor_scale = 0.70;
+        heat_scale = 0.06;
+    } else if (mat == 50u) { // SPH water
+        vapor_scale = 0.16;
+        heat_scale = 0.04;
+    } else if (mat == 51u) { // SPH viscous goo
+        vapor_scale = 0.08;
+        heat_scale = 0.03;
+    } else if (mat == 52u) { // SPH light oil
+        vapor_scale = 0.22;
+        heat_scale = 0.05;
+    } else if (mat == 53u) { // SPH burning oil
+        vapor_scale = 0.28;
+        heat_scale = 0.60;
+        combustion_scale = 1.48;
+        latent_relief = 0.56;
+    } else if (mat == 54u) { // SPH boiling water
+        vapor_scale = 0.95;
+        heat_scale = 0.05;
+    } else if (mat == 55u) { // SPH thermal syrup
+        vapor_scale = 0.18;
+        heat_scale = 0.03;
+    } else if (mat == 56u) { // SPH flash fluid
+        vapor_scale = 1.05;
+        heat_scale = 0.12;
+        combustion_scale = 0.24;
+        latent_relief = 0.72;
+    } else if (mat == 29u) { // cheese pull
+        vapor_scale = 0.52;
+        heat_scale = 0.05;
+    } else if (mat == 20u) { // puff clay
+        vapor_scale = 0.46;
+        heat_scale = 0.07;
+    } else if (mat == 17u || mat == 6u) { // foam / generic phase
+        vapor_scale = 0.28;
+        heat_scale = 0.08;
+    } else if (mat == 16u) { // flammable fluid
+        vapor_scale = 0.28;
+        heat_scale = 0.38;
+        combustion_scale = 0.96;
+        latent_relief = 0.74;
+    } else if (mat == 21u) { // firecracker / gunpowder family
+        vapor_scale = 0.82;
+        heat_scale = 0.46;
+        combustion_scale = 0.90;
+        latent_relief = 0.46;
+    } else if (mat == 25u) { // reactive burn
+        vapor_scale = 0.62;
+        heat_scale = 0.40;
+        combustion_scale = 0.82;
+        latent_relief = 0.50;
+    } else if (mat == 62u) { // sealed charge / airtight bomb
+        // Most of the blast should arrive through the trapped-cavity vent path,
+        // not as direct shell-to-air combustion every frame.
+        vapor_scale = 0.08;
+        heat_scale = 0.06;
+        combustion_scale = 0.12;
+        latent_relief = 0.92;
+    } else if (mat == 7u || mat == 8u) { // burning / ember
+        vapor_scale = 0.10;
+        heat_scale = 0.56;
+        combustion_scale = (mat == 8u) ? 1.35 : 1.18;
+        latent_relief = 0.52;
+    } else if (mat == 22u || mat == 26u || mat == 15u || mat == 18u) { // glaze / bloom / splinter
+        vapor_scale = 0.10;
+        heat_scale = 0.11;
+    } else if (mat == 4u || mat == 9u || mat == 10u || mat == 11u || mat == 12u || mat == 13u) { // clay / cured / brittle solids
+        vapor_scale = 0.03;
+        heat_scale = 0.10;
+    } else if (mat == 14u || mat == 24u || mat == 28u) { // glass / metal / filament glass
+        vapor_scale = 0.015;
+        heat_scale = 0.14;
+    } else if (mat == 30u) { // memory wax
+        vapor_scale = 0.03;
+        heat_scale = 0.06;
+    } else if (mat == 31u) { // ferrofluid
+        vapor_scale = 0.00;
+        heat_scale = 0.05;
+    } else if (mat == 32u) { // maillard / cooking
+        vapor_scale = 0.18;
+        heat_scale = 0.05;
+    } else if (mat == 33u) { // mushroom / spores
+        vapor_scale = 0.28;
+        heat_scale = 0.03;
+    } else if (mat == 3u || mat == 5u) { // fibers / fracture solids
+        vapor_scale = 0.05;
+        heat_scale = 0.09;
+    }
+
+    float vent_exchange = (mat == 62u) ? (0.10 + 0.90 * air_exchange) : air_exchange;
+    float vapor_emit = heat_factor * heat_factor * u_vapor_generation * vapor_scale * batch_outgas * vent_exchange;
+    float latent_mix = clamp(vapor_emit * u_latent_cooling * 0.8, 0.0, 0.85);
+    float latent_penalty = clamp(1.0 - 0.6 * latent_mix * latent_relief, 0.35, 1.0);
+    float local_air = air_temp[ci];
+    float local_surplus = max(temp - max(local_air, u_ambient_temp), 0.0);
+    float passive_heat = local_surplus * heat_scale * batch_heat * latent_penalty * vent_exchange * emit_gate * u_dt;
+    passive_heat = min(passive_heat, local_surplus * 0.28);
+
+    air_temp[ci] += passive_heat;
+    if (combustion_scale > 0.0) {
+        float plume_gain = mix(85.0, 220.0, heat_factor);
+        float combustion_surplus = max(temp - local_air, 0.0);
+        float combustion_gate = smoothstep(10.0, 120.0, combustion_surplus);
+        air_temp[ci] += u_combustion_heat_boost * batch_heat * combustion_scale * heat_factor * plume_gain * vent_exchange * combustion_gate * u_dt;
+    }
+    vapor[ci] = min(vapor[ci] + vapor_emit * u_dt, 3.0);
+    vapor_source[ci] = min(vapor_source[ci] + vapor_emit, 4.0);
+
+    // Inject velocity at faces
+    vel_u[ci] += vel.x * heat_factor * 0.015 * u_dt;
+    vel_v[ci] += vel.y * heat_factor * 0.015 * u_dt;
+
+    if (mat == 7u || mat == 8u || mat == 16u || mat == 21u || mat == 25u || mat == 53u || mat == 56u || mat == 62u) {
+        float smoke_rate = (mat == 16u) ? 1.1
+                         : ((mat == 21u) ? 4.8
+                         : ((mat == 25u) ? 3.6
+                         : ((mat == 53u) ? 1.7
+                         : ((mat == 56u) ? 1.1 : 2.0))));
+        if (mat == 62u) smoke_rate = 0.45;
+        smoke[ci] = min(smoke[ci] + heat_factor * smoke_rate * vent_exchange * u_dt, 2.0);
+    } else if (mat == 33u) {
+        smoke[ci] = min(smoke[ci] + heat_factor * 0.9 * air_exchange * u_dt, 2.0);
+    }
+
+    if (u_use_bio != 0) {
+        float bio_seed = 0.0;
+        if (mat == 32u) bio_seed = 0.34;                         // maillard
+        else if (mat == 33u) bio_seed = 0.96;                    // mushroom
+        else if (mat == 34u) bio_seed = 0.72;                    // crumb loaf
+        else if (mat == 19u || mat == 23u || mat == 27u) bio_seed = 0.62; // bread / crust / bun
+        else if (mat == 41u || mat == 44u || mat == 46u || mat == 47u) bio_seed = 0.58; // crumb variants
+        else if (mat == 49u) bio_seed = 0.44;                    // vented skin
+        else if (mat == 59u) bio_seed = 1.08;                    // topology goo
+        else if (mat == 60u) bio_seed = 0.22;                    // oobleck
+        else if (mat == 61u) bio_seed = 0.16;                    // memory gel
+        else if (mat == 63u) bio_seed = 0.88;                    // morph tissue
+        else if (mat == 64u) bio_seed = 0.74;                    // root weave
+        else if (mat == 65u) bio_seed = 0.96;                    // cell sheet
+        else if (mat == 66u) bio_seed = 0.92 * live_seed_gate + 0.58 * dormant_seed_gate;   // ash regrowth
+
+        if (bio_seed > 0.0) {
+            float hot_bias = clamp((temp - u_ambient_temp) / 260.0, 0.0, 1.0);
+            float seed_gain = (mat == 66u) ? mix(0.28, 1.36, cool_seed_gate)
+                                           : mix(0.30, 1.0, hot_bias);
+            float seed = u_bio_seed_strength * bio_seed * seed_gain * air_exchange * u_dt;
+            splat_bio_seed(grid_pos, seed * ((mat == 66u) ? 3.8 : 2.2));
+        }
+    }
+
+    if (u_use_automata != 0) {
+        float automata_seed = 0.0;
+        if (mat == 59u) automata_seed = 1.12;                      // topology goo
+        else if (mat == 63u) automata_seed = 1.05;                 // morph tissue
+        else if (mat == 64u) automata_seed = 0.82;                 // root weave
+        else if (mat == 65u) automata_seed = 1.10;                 // cell sheet
+        else if (mat == 66u) automata_seed = 0.96 * live_seed_gate + 0.70 * dormant_seed_gate; // ash regrowth
+        else if (mat == 33u) automata_seed = 0.68;                 // mushroom
+        else if (mat == 34u) automata_seed = 0.52;                 // crumb loaf
+        else if (mat == 32u) automata_seed = 0.30;                 // maillard
+        else if (mat == 19u || mat == 23u || mat == 27u) automata_seed = 0.40; // dough family
+
+        if (automata_seed > 0.0) {
+            float hot_bias = clamp((temp - u_ambient_temp) / 240.0, 0.0, 1.0);
+            float seed_gain = (mat == 66u) ? mix(0.24, 1.34, cool_seed_gate)
+                                           : mix(0.65, 1.0, hot_bias);
+            float seed = u_automata_seed_strength * automata_seed * seed_gain * air_exchange * u_dt;
+            splat_automata_seed(grid_pos, seed * ((mat == 66u) ? 3.2 : 1.8));
+        }
+    }
+
+    float support_seed = 0.0;
+    if (mat == 59u || mat == 63u || mat == 64u || mat == 65u) support_seed = 1.0;
+    else if (mat == 66u) support_seed = 1.30 * max(scaffold_seed_gate, dormant_seed_gate);
+    else if (mat == 33u || mat == 34u || mat == 32u) support_seed = 0.55;
+    else if (mat == 19u || mat == 23u || mat == 27u) support_seed = 0.36;
+
+    if (u_use_bio != 0) {
+        float bio_support = 0.0;
+        if (mat == 59u || mat == 63u || mat == 64u || mat == 65u) bio_support = 1.0;
+        else if (mat == 66u) bio_support = 1.30 * max(scaffold_seed_gate, dormant_seed_gate);
+        else if (mat == 33u || mat == 34u || mat == 32u) bio_support = 0.62;
+        else if (mat == 19u || mat == 23u || mat == 27u) bio_support = 0.40;
+        support_seed = max(support_seed, bio_support * (0.55 + 0.45 * u_bio_seed_strength));
+    }
+
+    if (support_seed > 0.0) {
+        float seed_gain = (mat == 66u) ? mix(0.68, 1.32, cool_seed_gate)
+                                       : mix(0.55, 1.0, heat_factor);
+        float seed = clamp(support_seed * seed_gain * air_exchange * u_dt * ((mat == 66u) ? 6.4 : 4.0), 0.0, (mat == 66u) ? 2.10 : 1.45);
+        splat_support_seed(grid_pos, seed);
+    }
+}

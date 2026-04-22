@@ -1,0 +1,34 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D u_phi_tex;
+layout(rgba32f, binding = 1) uniform image2D u_field_tex;
+
+uniform ivec2 u_resolution;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+
+float sample_phi(ivec2 px) {
+    px = clamp(px, ivec2(0), u_resolution - ivec2(1));
+    return texelFetch(u_phi_tex, px, 0).r;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+
+    vec2 cell = (u_world_max - u_world_min) / vec2(u_resolution);
+    float inv2dx = 0.5 / max(cell.x, 1e-5);
+    float inv2dy = 0.5 / max(cell.y, 1e-5);
+
+    float phi_l = sample_phi(pixel + ivec2(-1, 0));
+    float phi_r = sample_phi(pixel + ivec2( 1, 0));
+    float phi_b = sample_phi(pixel + ivec2(0, -1));
+    float phi_t = sample_phi(pixel + ivec2(0,  1));
+
+    vec2 H = vec2(-(phi_r - phi_l) * inv2dx,
+                  -(phi_t - phi_b) * inv2dy);
+    float h2 = dot(H, H);
+    imageStore(u_field_tex, pixel, vec4(H, sqrt(max(h2, 0.0)), h2));
+}

@@ -1,0 +1,133 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 2) readonly buffer MassBuffer { float masses[]; };
+layout(std430, binding = 6) readonly buffer TempBuffer { float temperatures[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+layout(std430, binding = 47) readonly buffer JpBuffer { float Jp_data[]; };
+layout(std430, binding = 49) readonly buffer DamageBuffer { float damage[]; };
+layout(std430, binding = 50) readonly buffer PhaseBuffer { float phase_data[]; };
+layout(std430, binding = 51) readonly buffer MatParams0 { vec4 mat_params0[]; };
+layout(std430, binding = 54) readonly buffer ThermalCouplingBuf { vec4 thermal_coupling[]; };
+
+layout(std430, binding = 73) coherent buffer AirtightOcc { int airtight_occ[]; };
+layout(std430, binding = 74) coherent buffer AirtightSource { int airtight_source[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform uint u_offset;
+uniform uint u_count;
+uniform ivec2 u_res;
+uniform float u_dx;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+uniform float u_ambient_temp;
+uniform int u_use_sdf;
+
+#define MAT_BURNING 7u
+#define MAT_EMBER 8u
+#define MAT_FIRECRACKER 21u
+#define MAT_REACTIVE_BURN 25u
+#define MAT_STONEWARE 38u
+#define MAT_SEALED_CHARGE 62u
+const float OCC_SCALE = 1000.0;
+const float SRC_SCALE = 1000.0;
+
+bool sample_sdf_solid(vec2 world_pos) {
+    if (u_use_sdf == 0) return false;
+    vec2 uv = (world_pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return false;
+    return texture(u_sdf_tex, uv).r < 0.0;
+}
+
+void write_occ(ivec2 cell, float occ) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return;
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    atomicMax(airtight_occ[ci], int(clamp(occ, 0.0, 1.0) * OCC_SCALE));
+}
+
+void add_source(ivec2 cell, float src) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return;
+    uint ci = uint(cell.y * u_res.x + cell.x);
+    atomicAdd(airtight_source[ci], int(max(src, 0.0) * SRC_SCALE));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    uint mat = material_ids[p];
+    vec4 thermal = thermal_coupling[idx];
+    bool sealed_charge = (mat == MAT_SEALED_CHARGE);
+    bool special_stone_shell = (mat == MAT_STONEWARE &&
+                                thermal.x < 0.08 &&
+                                thermal.y < 0.35 &&
+                                thermal.w <= 0.001);
+    bool reactive_source = (mat == MAT_BURNING || mat == MAT_EMBER ||
+                            mat == MAT_FIRECRACKER || mat == MAT_REACTIVE_BURN);
+
+    vec2 pos = positions[p];
+    if (sample_sdf_solid(pos)) return;
+
+    float mass = masses[p];
+    float temp = temperatures[p];
+    float crack = clamp(Jp_data[idx], 0.0, 1.0);
+    float cooked = clamp(damage[idx], 0.0, 1.0);
+    float gas = clamp(phase_data[idx], 0.0, 1.0);
+    float shell_seed = clamp(mat_params0[idx].w, 0.0, 1.0);
+    bool sealed_charge_shell = sealed_charge && shell_seed > 0.58;
+    bool airtight_shell = sealed_charge_shell || special_stone_shell;
+    if (!airtight_shell && !sealed_charge && !reactive_source) return;
+    float shell_integrity = shell_seed * (1.0 - smoothstep(0.16, 0.70, crack));
+    float shell_radius = max(u_dx * 1.90, sqrt(max(mass, 1e-6) / 1000.0) * 1.55);
+    ivec2 base = ivec2(floor((pos - u_world_min) / u_dx));
+    int shell_cells = int(ceil(shell_radius / u_dx)) + 1;
+    if (airtight_shell && shell_integrity > 0.04) {
+        for (int oy = -shell_cells; oy <= shell_cells; ++oy) {
+            for (int ox = -shell_cells; ox <= shell_cells; ++ox) {
+                ivec2 cell = base + ivec2(ox, oy);
+                vec2 center = u_world_min + (vec2(cell) + 0.5) * u_dx;
+                float dist = length(center - pos);
+                float w = max(1.0 - dist / max(shell_radius, 1e-5), 0.0);
+                if (w <= 0.0) continue;
+                float occ = min(shell_integrity *
+                                mix(0.12 + 0.90 * w * w,
+                                    0.18 + 1.18 * w * w,
+                                    special_stone_shell ? 1.0 : 0.0), 1.0);
+                write_occ(cell, occ);
+            }
+        }
+    }
+
+    float core_seed = 1.0 - shell_seed;
+    float heat = clamp((temp - (u_ambient_temp + 35.0)) / 520.0, 0.0, 1.0);
+    float pyro = max(gas, clamp((temp - 360.0) / 240.0, 0.0, 1.0) * (0.30 + 0.70 * cooked));
+    float source_strength = 0.0;
+    if (sealed_charge) {
+        source_strength = core_seed * pyro * max(thermal.y, 0.1) * mix(0.16, 1.18, heat);
+    } else {
+        float burn = clamp(damage[idx], 0.0, 1.0);
+        float reactive_gain = (mat == MAT_EMBER) ? 1.45
+                            : (mat == MAT_FIRECRACKER ? 1.70
+                            : (mat == MAT_REACTIVE_BURN ? 1.32 : 1.18));
+        float reactive_pyro = max(burn, clamp((temp - 420.0) / 360.0, 0.0, 1.0));
+        source_strength = reactive_pyro * reactive_gain * max(thermal.y, 0.25) * mix(0.10, 1.10, heat);
+    }
+    if (source_strength <= 1e-4) return;
+
+    float source_radius = max(u_dx * 1.15, shell_radius * (sealed_charge ? 0.84 : 0.58));
+    int source_cells = int(ceil(source_radius / u_dx)) + 1;
+    for (int oy = -source_cells; oy <= source_cells; ++oy) {
+        for (int ox = -source_cells; ox <= source_cells; ++ox) {
+            ivec2 cell = base + ivec2(ox, oy);
+            vec2 center = u_world_min + (vec2(cell) + 0.5) * u_dx;
+            float dist = length(center - pos);
+            float w = max(1.0 - dist / max(source_radius, 1e-5), 0.0);
+            if (w <= 0.0) continue;
+            add_source(cell, source_strength * w * w);
+        }
+    }
+}

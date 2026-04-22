@@ -1,0 +1,82 @@
+#version 450 core
+
+// Gray-Scott-style reaction-diffusion substrate for bio / automata-like effects.
+// A = nutrient, B = activator.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 79) readonly buffer BioA { float bio_a[]; };
+layout(std430, binding = 80) buffer BioAOut { float bio_a2[]; };
+layout(std430, binding = 81) readonly buffer BioB { float bio_b[]; };
+layout(std430, binding = 82) buffer BioBOut { float bio_b2[]; };
+layout(std430, binding = 89) readonly buffer BioSource { float bio_source[]; };
+layout(std430, binding = 66) readonly buffer AirTemp { float air_temp[]; };
+uniform ivec2 u_res;
+uniform float u_dt;
+uniform float u_diffuse_a;
+uniform float u_diffuse_b;
+uniform float u_feed;
+uniform float u_kill;
+uniform float u_ambient_temp;
+
+uint flat_idx(ivec2 c) {
+    return uint(c.y * u_res.x + c.x);
+}
+
+ivec2 clamp_cell(ivec2 c) {
+    return clamp(c, ivec2(0), u_res - 1);
+}
+
+float sample_a(ivec2 c) { return bio_a[flat_idx(clamp_cell(c))]; }
+float sample_b(ivec2 c) { return bio_b[flat_idx(clamp_cell(c))]; }
+float sample_source(ivec2 c) { return bio_source[flat_idx(clamp_cell(c))]; }
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = uint(u_res.x * u_res.y);
+    if (idx >= total) return;
+
+    ivec2 c = ivec2(int(idx) % u_res.x, int(idx) / u_res.x);
+
+    float A = bio_a[idx];
+    float B = bio_b[idx];
+    float temp = air_temp[idx];
+    float lap_a =
+        sample_a(c + ivec2(-1, 0)) +
+        sample_a(c + ivec2( 1, 0)) +
+        sample_a(c + ivec2( 0,-1)) +
+        sample_a(c + ivec2( 0, 1)) -
+        4.0 * A;
+
+    float lap_b =
+        sample_b(c + ivec2(-1, 0)) +
+        sample_b(c + ivec2( 1, 0)) +
+        sample_b(c + ivec2( 0,-1)) +
+        sample_b(c + ivec2( 0, 1)) -
+        4.0 * B;
+
+    float source = clamp(sample_source(c), 0.0, 1.0);
+    float source_core = smoothstep(0.035, 0.24, source);
+    float source_halo = max(smoothstep(0.006, 0.12, source) - source_core, 0.0);
+    float frontier = max(lap_b, 0.0);
+    float fire_kill = smoothstep(u_ambient_temp + 150.0, u_ambient_temp + 410.0, temp);
+
+    float reaction = A * B * B;
+    float next_a = A + (u_diffuse_a * lap_a - reaction + u_feed * (1.0 - A)) * u_dt;
+    float next_b = B + (u_diffuse_b * lap_b + reaction - (u_kill + u_feed) * B) * u_dt;
+
+    // Drive the visible bio field from a blurred occupancy/source cloud rather
+    // than from direct particle stamps. This lets it extend into the nearby gas
+    // as a soft scout front that can later pull the blob along.
+    float core_birth = source_core * (0.10 + 0.22 * (1.0 - B)) * A;
+    float halo_birth = source_halo * (0.03 + 0.07 * smoothstep(0.01, 0.14, B)) * A * (1.0 - B);
+    float scout_gain = mix(0.12, 0.40, clamp(source_core + source_halo * 0.65, 0.0, 1.0));
+    float scout_growth = frontier * scout_gain * A * (1.0 - B);
+    next_b += (core_birth + halo_birth + scout_growth) * u_dt;
+    next_a -= (core_birth * 0.56 + halo_birth * 0.18 + scout_growth * 0.42) * u_dt;
+    next_b = max(next_b - fire_kill * (0.26 + 0.66 * B) * u_dt, 0.0);
+    next_a = clamp(next_a + fire_kill * 0.12 * u_dt, 0.0, 1.0);
+
+    bio_a2[idx] = clamp(next_a, 0.0, 1.0);
+    bio_b2[idx] = clamp(next_b, 0.0, 1.0);
+}

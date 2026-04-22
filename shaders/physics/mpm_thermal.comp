@@ -1,0 +1,79 @@
+#version 450 core
+
+// Thermal diffusion on MPM grid: dT/dt = k * laplacian(T) + Q
+// Uses explicit Euler with 5-point stencil Laplacian
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 40) readonly buffer GridMass { int grid_mass[]; };
+
+const float INV_FIXED_SCALE = 1.0 / 1000000.0;
+layout(std430, binding = 45) readonly buffer TempIn   { float temp_in[];  };
+layout(std430, binding = 46) writeonly buffer TempOut  { float temp_out[]; };
+
+uniform uint u_grid_cells;
+uniform ivec2 u_grid_res;
+uniform float u_dx;
+uniform float u_dt;
+uniform float u_thermal_k;     // Thermal diffusivity
+uniform int u_physically_based_heat;
+uniform float u_heat_source_x; // Heat source position
+uniform float u_heat_source_y;
+uniform float u_heat_source_radius;
+uniform float u_heat_source_temp;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_grid_cells) return;
+
+    float m = float(grid_mass[idx]) * INV_FIXED_SCALE;
+    if (m < 1e-10) {
+        temp_out[idx] = temp_in[idx];
+        return;
+    }
+
+    ivec2 node = ivec2(idx % uint(u_grid_res.x), idx / uint(u_grid_res.x));
+
+    // 5-point Laplacian
+    float T_c = temp_in[idx];
+    float T_l = (node.x > 0) ? temp_in[idx - 1u] : T_c;
+    float T_r = (node.x < u_grid_res.x - 1) ? temp_in[idx + 1u] : T_c;
+    float T_d = (node.y > 0) ? temp_in[idx - uint(u_grid_res.x)] : T_c;
+    float T_u = (node.y < u_grid_res.y - 1) ? temp_in[idx + uint(u_grid_res.x)] : T_c;
+
+    // Only diffuse where mass exists
+    float m_l = (node.x > 0) ? float(grid_mass[idx - 1u]) * INV_FIXED_SCALE : 0.0;
+    float m_r = (node.x < u_grid_res.x - 1) ? float(grid_mass[idx + 1u]) * INV_FIXED_SCALE : 0.0;
+    float m_d = (node.y > 0) ? float(grid_mass[idx - uint(u_grid_res.x)]) * INV_FIXED_SCALE : 0.0;
+    float m_u = (node.y < u_grid_res.y - 1) ? float(grid_mass[idx + uint(u_grid_res.x)]) * INV_FIXED_SCALE : 0.0;
+
+    float transfer_sum = 0.0;
+    float count = 0.0;
+    if (m_l > 1e-10) { transfer_sum += T_l - T_c; count += 1.0; }
+    if (m_r > 1e-10) { transfer_sum += T_r - T_c; count += 1.0; }
+    if (m_d > 1e-10) { transfer_sum += T_d - T_c; count += 1.0; }
+    if (m_u > 1e-10) { transfer_sum += T_u - T_c; count += 1.0; }
+
+    float new_T = T_c;
+    if (count > 0.0) {
+        float alpha = u_thermal_k * u_dt / (u_dx * u_dx);
+        if (u_physically_based_heat == 1) {
+            alpha = clamp(alpha, 0.0, 0.24);
+            new_T = T_c + alpha * transfer_sum;
+        } else {
+            float lap = transfer_sum / (u_dx * u_dx);
+            new_T = T_c + u_dt * u_thermal_k * lap;
+        }
+    }
+
+    // Heat source (e.g., fire, oven)
+    vec2 src = vec2(u_heat_source_x, u_heat_source_y);
+    vec2 world_pos = vec2(node) * u_dx; // Approximate
+    float dist = length(world_pos - src);
+    if (dist < u_heat_source_radius && u_heat_source_temp > 0.0) {
+        float blend = 1.0 - dist / u_heat_source_radius;
+        new_T = mix(new_T, u_heat_source_temp, blend * 0.1);
+    }
+
+    temp_out[idx] = clamp(new_T, 0.0, 2000.0);
+}

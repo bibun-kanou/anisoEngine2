@@ -1,0 +1,80 @@
+#version 450 core
+
+// Persistent morphogen source field. Particles inject raw source each frame,
+// then the field diffuses and decays over time so it can leak into air and
+// keep a memory of recent growth instead of collapsing back to an occupancy
+// stamp every step.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 88) readonly buffer BioSourceSeed { float bio_source_seed[]; };
+layout(std430, binding = 86) readonly buffer BioSupport { float bio_support[]; };
+layout(std430, binding = 89) readonly buffer BioSource { float bio_source[]; };
+layout(std430, binding = 90) buffer BioSourceOut { float bio_source2[]; };
+layout(std430, binding = 66) readonly buffer AirTemp { float air_temp[]; };
+
+uniform ivec2 u_res;
+uniform float u_dt;
+uniform float u_diffuse;
+uniform float u_decay;
+uniform float u_ambient_temp;
+
+uint flat_idx(ivec2 c) {
+    return uint(c.y * u_res.x + c.x);
+}
+
+ivec2 clamp_cell(ivec2 c) {
+    return clamp(c, ivec2(0), u_res - 1);
+}
+
+float sample_seed(ivec2 c) { return bio_source_seed[flat_idx(clamp_cell(c))]; }
+float sample_support(ivec2 c) { return bio_support[flat_idx(clamp_cell(c))]; }
+float sample_source(ivec2 c) { return bio_source[flat_idx(clamp_cell(c))]; }
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = uint(u_res.x * u_res.y);
+    if (idx >= total) return;
+
+    ivec2 c = ivec2(int(idx) % u_res.x, int(idx) / u_res.x);
+
+    float source = sample_source(c);
+    float support = clamp(sample_support(c), 0.0, 1.0);
+    float temp = air_temp[idx];
+    float seed_raw = max(sample_seed(c), 0.0);
+    float emit = 1.0 - exp(-seed_raw * 0.75);
+    float support_core = smoothstep(0.05, 0.24, support);
+    float support_halo = max(smoothstep(0.004, 0.18, support) - support_core * 0.55, 0.0);
+    float source_front = smoothstep(0.02, 0.14, source) * (1.0 - smoothstep(0.22, 0.48, source));
+    float source_fill = smoothstep(0.08, 0.30, source);
+    float far_from_blob = (1.0 - support_core) * (1.0 - support_halo);
+    float fire_kill = smoothstep(u_ambient_temp + 145.0, u_ambient_temp + 390.0, temp);
+
+    float lap =
+        sample_source(c + ivec2(-1, 0)) +
+        sample_source(c + ivec2( 1, 0)) +
+        sample_source(c + ivec2( 0,-1)) +
+        sample_source(c + ivec2( 0, 1)) -
+        4.0 * source;
+
+    float diag_lap =
+        sample_source(c + ivec2(-1,-1)) +
+        sample_source(c + ivec2( 1,-1)) +
+        sample_source(c + ivec2(-1, 1)) +
+        sample_source(c + ivec2( 1, 1)) -
+        4.0 * source;
+
+    float diffusion_gate = 0.56 + 0.82 * support_halo + 0.34 * source_front + 0.20 * support_core;
+    float diffused = (u_diffuse * lap + u_diffuse * 0.34 * diag_lap) * diffusion_gate;
+    float injected = emit * (0.20 + 0.54 * support_core + 0.52 * support_halo) * (0.48 + 0.52 * (1.0 - source_fill)) * (1.0 - 0.72 * fire_kill);
+    float scaffold_bridge = support_halo * (0.05 + 0.18 * source_front + 0.10 * source_fill) * (1.0 - 0.55 * fire_kill);
+    float extra_decay = far_from_blob * (0.10 + 0.28 * (1.0 - source_front)) +
+                        (1.0 - far_from_blob) * (0.01 + 0.05 * (1.0 - source_front)) +
+                        fire_kill * (0.66 + 0.78 * source_fill);
+    float next = source + (diffused + injected + scaffold_bridge - (u_decay + extra_decay) * source) * u_dt;
+    next = max(next - fire_kill * (0.28 + 0.44 * source_front) * u_dt, 0.0);
+    if (far_from_blob > 1e-4) {
+        next *= mix(1.0, 0.92 + 0.08 * source_front, far_from_blob);
+    }
+    bio_source2[idx] = clamp(next, 0.0, 1.0);
+}

@@ -1,0 +1,92 @@
+#version 450 core
+
+// MAC grid semi-Lagrangian advection
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 60) readonly buffer VelU  { float vel_u[];  };
+layout(std430, binding = 61) readonly buffer VelV  { float vel_v[];  };
+layout(std430, binding = 62) writeonly buffer VelU2 { float vel_u2[]; };
+layout(std430, binding = 63) writeonly buffer VelV2 { float vel_v2[]; };
+layout(std430, binding = 66) readonly buffer Temp  { float temperature[]; };
+layout(std430, binding = 67) writeonly buffer Temp2 { float temperature2[]; };
+layout(std430, binding = 68) readonly buffer Smoke { float smoke[];  };
+layout(std430, binding = 69) writeonly buffer Smoke2{ float smoke2[]; };
+layout(std430, binding = 70) readonly buffer Vapor { float vapor[]; };
+layout(std430, binding = 71) writeonly buffer Vapor2 { float vapor2[]; };
+
+layout(binding = 0) uniform sampler2D u_sdf_tex;
+
+uniform ivec2 u_res;
+uniform float u_dt, u_dx;
+uniform float u_smoke_decay;
+uniform float u_vapor_decay;
+uniform vec2 u_world_min, u_world_max;
+uniform int u_use_sdf;
+
+bool is_solid(ivec2 cell) {
+    if (u_use_sdf == 0) return false;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= u_res.x || cell.y >= u_res.y) return true;
+    vec2 uv = (vec2(cell) + 0.5) / vec2(u_res);
+    vec2 wp = mix(u_world_min, u_world_max, uv);
+    vec2 suv = (wp - u_world_min) / (u_world_max - u_world_min);
+    return texture(u_sdf_tex, suv).r < 0.0;
+}
+
+// Sample a cell-centered field with bilinear interpolation
+float sample_cc(int field, vec2 pos) {
+    vec2 p = clamp(pos - 0.5, vec2(0.0), vec2(u_res) - 2.0);
+    ivec2 i = ivec2(floor(p));
+    vec2 f = p - vec2(i);
+    uint i00 = uint(i.y * u_res.x + i.x);
+    uint i10 = i00 + 1u;
+    uint i01 = i00 + uint(u_res.x);
+    uint i11 = i01 + 1u;
+    float v00, v10, v01, v11;
+    if (field == 0) { v00=vel_u[i00]; v10=vel_u[i10]; v01=vel_u[i01]; v11=vel_u[i11]; }
+    else if (field == 1) { v00=vel_v[i00]; v10=vel_v[i10]; v01=vel_v[i01]; v11=vel_v[i11]; }
+    else if (field == 2) { v00=temperature[i00]; v10=temperature[i10]; v01=temperature[i01]; v11=temperature[i11]; }
+    else if (field == 3) { v00=smoke[i00]; v10=smoke[i10]; v01=smoke[i01]; v11=smoke[i11]; }
+    else { v00=vapor[i00]; v10=vapor[i10]; v01=vapor[i01]; v11=vapor[i11]; }
+    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+}
+
+// Get velocity at a cell-center position by averaging face velocities
+vec2 vel_at(vec2 pos) {
+    float u = sample_cc(0, pos);
+    float v = sample_cc(1, pos);
+    return vec2(u, v);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_res.x * u_res.y)) return;
+
+    ivec2 cell = ivec2(idx % uint(u_res.x), idx / uint(u_res.x));
+
+    if (is_solid(cell)) {
+        vel_u2[idx] = 0.0;
+        vel_v2[idx] = 0.0;
+        temperature2[idx] = temperature[idx];
+        smoke2[idx] = 0.0;
+        vapor2[idx] = 0.0;
+        return;
+    }
+
+    vec2 pos = vec2(cell) + 0.5; // Cell center in grid coords
+    vec2 vel = vel_at(pos);
+
+    // CFL clamp
+    vec2 trace = vel * u_dt / u_dx;
+    float tlen = length(trace);
+    if (tlen > 4.0) trace *= 4.0 / tlen;
+
+    vec2 back = pos - trace;
+
+    // Advect all fields
+    vel_u2[idx] = sample_cc(0, back);
+    vel_v2[idx] = sample_cc(1, back);
+    temperature2[idx] = sample_cc(2, back);
+    smoke2[idx] = sample_cc(3, back) * u_smoke_decay;
+    vapor2[idx] = sample_cc(4, back) * u_vapor_decay;
+}
