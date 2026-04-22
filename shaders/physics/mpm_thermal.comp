@@ -56,14 +56,13 @@ void main() {
 
     float new_T = T_c;
     if (count > 0.0) {
+        // Both branches were mathematically identical up to a missing CFL clamp on the
+        // non-physical path. Always clamp alpha so the non-physical mode can't amplify
+        // at high k/dt; 0.24 is inside the 2D explicit-Euler stability window (0.25 for
+        // a 4-neighbor Laplacian).
         float alpha = u_thermal_k * u_dt / (u_dx * u_dx);
-        if (u_physically_based_heat == 1) {
-            alpha = clamp(alpha, 0.0, 0.24);
-            new_T = T_c + alpha * transfer_sum;
-        } else {
-            float lap = transfer_sum / (u_dx * u_dx);
-            new_T = T_c + u_dt * u_thermal_k * lap;
-        }
+        alpha = clamp(alpha, 0.0, 0.24);
+        new_T = T_c + alpha * transfer_sum;
     }
 
     // Heat source (e.g., fire, oven)

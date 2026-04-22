@@ -1440,7 +1440,11 @@ void main() {
         float nu_d = clamp(mix(0.33, 0.27, baked), 0.16, 0.38);
         float mu_d = E_d / (2.0 * (1.0 + nu_d));
         float lam_d = E_d * nu_d / ((1.0 + nu_d) * (1.0 - 2.0 * nu_d));
-        float J_rest = 1.0 + gas * mix(0.24, 0.36, baked) - baked * 0.02 - crumb_set * 0.015;
+        // Match crust_dough / steam_bun: gas-inflated J_rest benefits from 2.5D depth so
+        // plain bread doesn't starve for the pseudo-thickness reinforcement the other
+        // baking materials already get.
+        float J_rest = 1.0 + gas * mix(0.24, 0.36, baked) * (1.0 + 0.22 * pseudo_depth)
+                           - baked * 0.02 - crumb_set * 0.015;
 
         stress = 2.0 * mu_d * (F - R) * transpose(F)
                + lam_d * (J - J_rest) * J * mat2(1.0);
@@ -1448,8 +1452,8 @@ void main() {
 
         float tensile = max(max(svd.sigma.x, svd.sigma.y) - 1.0, 0.0);
         float shear = abs(svd.sigma.x - svd.sigma.y);
-        float tear_thresh = mix(0.36, 0.20, baked) + crumb_set * 0.08;
-        float tear_rate = mix(0.18, 1.55, baked) * (1.0 + gas * 0.9);
+        float tear_thresh = (mix(0.36, 0.20, baked) + crumb_set * 0.08) * pseudo_enclosure_hold;
+        float tear_rate = mix(0.18, 1.55, baked) * (1.0 + gas * 0.9) / pseudo_split_hold;
         float tear_drive = max(tensile * 1.00 + shear * 0.78 + gas * (0.18 + baked * 0.14) - tear_thresh, 0.0);
         tear += tear_drive * tear_rate * u_dt;
         tear = clamp(tear, 0.0, 1.0);
@@ -3578,7 +3582,9 @@ void main() {
         R = svd.U * transpose(svd.V);
         J = svd.sigma.x * svd.sigma.y;
 
-        float E_ar = E * mix(1.10, 2.85, rigid_ash) * mix(1.0, 1.35, live) * scaffold;
+        // Ash should soften the matrix, not reinforce it. The previous 2.85x multiplier
+        // made fully-ashed tissue stiffer than living tissue — the opposite of "brittle".
+        float E_ar = E * mix(1.10, 0.35, rigid_ash) * mix(1.0, 1.35, live) * scaffold;
         float nu_ar = clamp(mix(0.12, 0.24, live), 0.06, 0.28);
         float mu_ar = E_ar / (2.0 * (1.0 + nu_ar));
         float lam_ar = E_ar * nu_ar / ((1.0 + nu_ar) * (1.0 - 2.0 * nu_ar));
@@ -3598,6 +3604,20 @@ void main() {
         crumble += crumble_drive * (0.10 + 0.82 * rigid_ash) * u_dt;
         crumble -= live * 0.08 * regrow_rate * u_dt;
         crumble = clamp(crumble, 0.0, 1.0);
+
+        // Without explicit advancement the regrow/ash scalars only ever hold whatever
+        // value they were initialized with, so healing is invisible and ash never really
+        // builds. Cool cells heal toward 1, hot cells burn into ash.
+        float heal_drive = clamp((360.0 - temp) / 110.0, 0.0, 1.0);
+        float burn_drive = clamp((temp - 420.0) / 210.0, 0.0, 1.0);
+        regrow += heal_drive * 0.42 * regrow_rate * (1.0 - regrow) * u_dt;
+        regrow -= burn_drive * 0.60 * regrow * u_dt;
+        regrow -= crumble_drive * 0.22 * u_dt;
+        regrow = clamp(regrow, 0.0, 1.0);
+
+        ash += burn_drive * 0.72 * (1.0 - ash) * u_dt;
+        ash -= recovery * 0.22 * regrow_rate * ash * u_dt;
+        ash = clamp(ash, 0.0, 1.0);
 
         damage[idx] = regrow;
         phase_data[idx] = ash;
