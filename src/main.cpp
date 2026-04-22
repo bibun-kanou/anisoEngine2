@@ -130,7 +130,11 @@ enum class ProjectilePreset : int {
     SOFT_EVEN_DEEPER_FUSE_BOMB = 53,
     MEDIUM_EVEN_DEEPER_FUSE_BOMB = 54,
     ABOVE_MED_EVEN_DEEPER_FUSE_BOMB = 55,
-    EVEN_DEEPER_FUSE_BOMB = 56
+    EVEN_DEEPER_FUSE_BOMB = 56,
+    // Launcher2 hybrid weapons (composed from existing primitives)
+    ROCKET_PAYLOAD = 57,
+    ROCKET_SIDE_CLAYMORE = 58,
+    CLAYMORE_CLUSTER = 59
 };
 
 enum class ProjectileDragMode : int {
@@ -916,7 +920,17 @@ struct ProjectilePresetDesc {
         CASCADE = 21,
         CRYO = 22,
         SPIRAL = 23,
-        EVEN_DEEPER_FUSE = 24
+        EVEN_DEEPER_FUSE = 24,
+        // Launcher2 extensions: hybrid weapons composed from the primitives above.
+        // ROCKET_PAYLOAD = rocket body that flings claymore-style shrapnel forward on
+        //                  rupture (warhead at the end of the flight).
+        // ROCKET_SIDE_CLAYMORE = rocket that vents a side claymore burst while
+        //                  cruising, plus a forward burst on rupture.
+        // CLAYMORE_CLUSTER = claymore base with CLUSTER-style sub-munition payload
+        //                  (small FIRECRACKER bomblets) instead of solid beads.
+        ROCKET_PAYLOAD = 25,
+        ROCKET_SIDE_CLAYMORE = 26,
+        CLAYMORE_CLUSTER = 27
     };
 
     Kind kind;
@@ -931,20 +945,23 @@ struct ProjectilePresetDesc {
 
 static ProjectilePreset active_projectile_preset_id() {
     if (g_mode == InteractMode::LAUNCHER2) {
-        // Fixed three-weapon palette for the key-6 launcher. Any new LAUNCHER2
-        // weapon just needs an entry here plus a name in the UI combo below.
-        // TIME_BOMB maps to REAL_TIME_BOMB, not the older TIME_BOMB kind — the
-        // latter's delay was unreliable. REAL_TIME_BOMB is the pressure-vessel
-        // variant with an airtight SEALED_CHARGE shell and a proper fuse track.
-        static constexpr ProjectilePreset kLauncher2[3] = {
+        // Six-weapon palette for the key-6 launcher. TIME_BOMB maps to
+        // REAL_TIME_BOMB (pressure-vessel with airtight shell), not the older
+        // TIME_BOMB kind — the latter's delay was unreliable. The hybrid entries
+        // (ROCKET_PAYLOAD, ROCKET_SIDE_CLAYMORE, CLAYMORE_CLUSTER) are new
+        // compositions of the primitives above.
+        static constexpr ProjectilePreset kLauncher2[6] = {
             ProjectilePreset::REAL_TIME_BOMB,
             ProjectilePreset::ROCKET,
-            ProjectilePreset::CLAYMORE
+            ProjectilePreset::CLAYMORE,
+            ProjectilePreset::ROCKET_PAYLOAD,
+            ProjectilePreset::ROCKET_SIDE_CLAYMORE,
+            ProjectilePreset::CLAYMORE_CLUSTER
         };
-        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 2)];
+        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 5)];
     }
     return static_cast<ProjectilePreset>(
-        glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::EVEN_DEEPER_FUSE_BOMB)));
+        glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::CLAYMORE_CLUSTER)));
 }
 
 static ProjectilePresetDesc current_projectile_preset() {
@@ -1118,6 +1135,15 @@ static ProjectilePresetDesc current_projectile_preset() {
     case ProjectilePreset::EVEN_DEEPER_FUSE_BOMB:
         return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::EVEN_DEEPER_FUSE, ng::MPMMaterial::SEALED_CHARGE, 134000.0f, 5.5f * weight_scale, 300.0f, ng::vec4(1.66f, 1.84f, 0.72f, 0.01f),
                  "Even deeper fuse bomb: an extra-buried multi-wrap fuse path that roughly doubles the original deep fuse delay before the core finally lights in earnest." };
+    case ProjectilePreset::ROCKET_PAYLOAD:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD, ng::MPMMaterial::SEALED_CHARGE, 82000.0f, 4.5f * weight_scale, 300.0f, ng::vec4(1.62f, 1.84f, 0.60f, 0.02f),
+                 "Rocket + forward payload: the rocket body propels normally, and when the shell finally ruptures it flings a dense claymore-style shrapnel pack forward along the flight axis." };
+    case ProjectilePreset::ROCKET_SIDE_CLAYMORE:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE, ng::MPMMaterial::SEALED_CHARGE, 82000.0f, 4.6f * weight_scale, 300.0f, ng::vec4(1.70f, 1.88f, 0.60f, 0.02f),
+                 "Rocket with side claymores: a forward-propelling rocket that also vents lateral fragment bursts mid-flight. Good for sweeping a corridor while moving through it." };
+    case ProjectilePreset::CLAYMORE_CLUSTER:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER, ng::MPMMaterial::SEALED_CHARGE, 78000.0f, 4.6f * weight_scale, 300.0f, ng::vec4(1.72f, 1.92f, 0.62f, 0.03f),
+                 "Claymore with cluster payload: instead of solid beads, the claymore front launches a spray of small secondary FIRECRACKER bomblets that each cook off shortly after being flung out." };
     case ProjectilePreset::STEEL:
     default:
         return { ProjectilePresetDesc::Kind::SINGLE, ProjectilePresetDesc::VesselMode::ROUND, ng::MPMMaterial::THERMO_METAL, g_ball_stiffness, 7.5f * weight_scale, 300.0f, ng::vec4(1.0f),
@@ -2109,7 +2135,10 @@ static void fire_projectile(ng::vec2 origin) {
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CATACLYSM ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CASCADE ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CRYO ||
-                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::SPIRAL)) {
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::SPIRAL ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER)) {
             collect_layered_bomb_layers(origin, g_ball_radius, launch_angle, shape, spacing,
                                         core_positions, core_shell, fuse_positions, fuse_shell,
                                         shell_positions, shell_shell, armor_positions, armor_shell);
@@ -2123,10 +2152,19 @@ static void fire_projectile(ng::vec2 origin) {
         } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE ||
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::HEAT ||
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::APHE ||
-                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::TANDEM) {
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::TANDEM ||
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD ||
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE) {
+            // ROCKET_PAYLOAD / ROCKET_SIDE_CLAYMORE both carry a claymore-style shrapnel
+            // pack; the rocket preset setup below decides whether it launches forward
+            // on rupture or sideways mid-flight.
             collect_claymore_payload(origin, g_ball_radius, launch_angle, shape, spacing,
                                      payload_positions, payload_shell);
-        } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLUSTER) {
+        } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLUSTER ||
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER) {
+            // CLAYMORE_CLUSTER: same cluster bomblet spray as CLUSTER, but the base
+            // vessel is tuned like a claymore (forward-biased burst). Wired here so
+            // the payload material is FIRECRACKER (secondary cook-off) not steel.
             collect_payload_cloud_points(origin, g_ball_radius, launch_angle, shape, spacing,
                                          payload_positions, payload_shell);
         } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CASCADE) {
@@ -2785,6 +2823,98 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.plume_radius_scale = 1.18f;
                 vessel.ignition_delay = 0.18f;
                 vessel.ignition_window = 0.18f;
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD) {
+                // Rocket body (copied from the baseline ROCKET tuning that propels
+                // cleanly) plus a forward-biased claymore payload that fires when the
+                // shell finally ruptures at the end of the flight.
+                shell_stiffness = 118000.0f;
+                shell_density *= 0.96f;
+                fuse_stiffness = 17000.0f;
+                fuse_density *= 0.82f;
+                core_stiffness = 21400.0f;
+                core_density *= 1.12f;
+                fuse_initial_temp = 560.0f;
+                core_initial_temp = 340.0f;
+                core_thermal = ng::vec4(2.20f, 1.70f, 0.58f, 0.00f);
+                vessel.gas_mass = 0.10f;
+                vessel.axis_bias = 1.0f;
+                vessel.gas_source_scale = 0.65f;
+                vessel.rupture_scale = 2.60f;
+                vessel.burst_scale = 0.42f;
+                vessel.shell_push_scale = 0.62f;
+                vessel.core_push_scale = 0.82f;
+                vessel.leak_scale = 2.00f;
+                vessel.nozzle_open = 0.42f;
+                vessel.thrust_scale = 3.80f;
+                vessel.payload_push_scale = 3.80f;
+                vessel.payload_cone = 0.72f;
+                vessel.payload_directionality = 1.0f;
+                payload_material = ng::MPMMaterial::THERMO_METAL;
+                payload_stiffness = 140000.0f;
+                payload_density = 6.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
+                payload_initial_temp = 300.0f;
+                payload_thermal = ng::vec4(0.14f, 0.22f, 1.00f, 0.00f);
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE) {
+                // Rocket that vents a lateral fragment burst mid-flight via side_blast
+                // plus a mild forward payload on final rupture. Takes longer to rupture
+                // than ROCKET_PAYLOAD since most of its energy escapes sideways.
+                shell_stiffness = 112000.0f;
+                shell_density *= 0.98f;
+                fuse_stiffness = 18000.0f;
+                fuse_density *= 0.84f;
+                core_stiffness = 21800.0f;
+                core_density *= 1.10f;
+                fuse_initial_temp = 580.0f;
+                core_initial_temp = 340.0f;
+                core_thermal = ng::vec4(2.45f, 1.78f, 0.58f, 0.00f);
+                vessel.gas_mass = 0.10f;
+                vessel.axis_bias = 0.75f;
+                vessel.gas_source_scale = 0.72f;
+                vessel.rupture_scale = 2.80f;
+                vessel.burst_scale = 0.44f;
+                vessel.shell_push_scale = 0.68f;
+                vessel.core_push_scale = 0.80f;
+                vessel.leak_scale = 1.80f;
+                vessel.nozzle_open = 0.40f;
+                vessel.thrust_scale = 3.60f;
+                vessel.side_blast_scale = 1.70f;
+                vessel.payload_push_scale = 2.60f;
+                vessel.payload_cone = 0.28f;
+                vessel.payload_directionality = 0.40f;
+                payload_material = ng::MPMMaterial::THERMO_METAL;
+                payload_stiffness = 132000.0f;
+                payload_density = 5.4f * glm::max(g_ball_weight, 0.5f) / 6.0f;
+                payload_initial_temp = 300.0f;
+                payload_thermal = ng::vec4(0.14f, 0.22f, 1.00f, 0.00f);
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER) {
+                // Claymore body with CLUSTER-style FIRECRACKER bomblets. The base
+                // stays forward-biased (claymore shell config), but the payload is
+                // small reactive charges that each cook off after being ejected.
+                shell_stiffness = 126000.0f;
+                shell_density *= 1.02f;
+                fuse_stiffness = 24000.0f;
+                fuse_density *= 0.90f;
+                core_stiffness = 19400.0f;
+                core_density *= 1.18f;
+                core_thermal = ng::vec4(3.20f, 1.94f, 0.60f, 0.03f);
+                vessel.gas_mass = 0.14f;
+                vessel.axis_bias = 0.95f;
+                vessel.gas_source_scale = 1.00f;
+                vessel.rupture_scale = 1.10f;
+                vessel.burst_scale = 0.96f;
+                vessel.shell_push_scale = 0.72f;
+                vessel.core_push_scale = 0.92f;
+                vessel.leak_scale = 0.70f;
+                vessel.payload_push_scale = 3.40f;
+                vessel.payload_cone = 0.62f;
+                vessel.payload_directionality = 0.85f;
+                vessel.plume_push_scale = 1.08f;
+                vessel.plume_heat_scale = 1.12f;
+                payload_material = ng::MPMMaterial::FIRECRACKER;
+                payload_stiffness = 14000.0f;
+                payload_density = 1.9f * glm::max(g_ball_weight, 0.5f) / 6.0f;
+                payload_initial_temp = g_projectile_auto_arm ? 332.0f : 300.0f;
+                payload_thermal = ng::vec4(1.28f, 1.44f, 0.76f, 0.06f);
             }
 
             switch (preset_id) {
@@ -4640,9 +4770,12 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
             static const char* launcher2_names[] = {
                 "Time Bomb",
                 "Rocket",
-                "Claymore"
+                "Claymore",
+                "Rocket + Payload",
+                "Rocket + Side Claymores",
+                "Claymore + Cluster"
             };
-            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 3);
+            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 6);
             ProjectilePresetDesc ui_preset = current_projectile_preset();
             if (ui_preset.kind != ProjectilePresetDesc::Kind::SINGLE) {
                 ImGui::Checkbox("Auto-Arm on Launch", &g_projectile_auto_arm);
@@ -5669,7 +5802,7 @@ static void render_tool_indicator(ng::vec2 mouse_world, ng::f32 time, InteractMo
         glDrawArrays(GL_LINE_LOOP, 0, 64);
     }
 
-    if (active_mode == InteractMode::DROP_BALL) {
+    if (active_mode == InteractMode::DROP_BALL || active_mode == InteractMode::LAUNCHER2) {
         ng::vec2 origin = mouse_world;
         if (g_ball_drag_mode != ProjectileDragMode::NONE) {
             origin = g_ball_drag_anchor;
