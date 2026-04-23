@@ -2087,9 +2087,21 @@ static void update_pressure_vessels(ng::f32 dt) {
         }
         vessel.burst_energy *= std::exp(-4.8f * dt);
 
-        ng::f32 shell_push = (vessel.pressure * (1.8f + effective_vent * 4.6f) + vessel.burst_energy * 18.0f) * vessel.shell_push_scale * dt;
-        ng::f32 crack_drive = (vessel.pressure * (0.07f + 0.24f * (1.0f - shell_integrity)) +
-                               vessel.burst_energy * 0.85f + shell_hot * 0.05f) * dt;
+        // Freeze the "pressure pushes shell outward" mechanics during the delay
+        // window (triggered but not yet ruptured). Without this, a long fuse
+        // lets internal pressure disperse the shell over the delay, and the
+        // real blast plume then fires at the already-scattered center —
+        // looking like a "second explosion out of nowhere". By zeroing the
+        // pressure/burst sources during delay, the shell stays intact until
+        // rupture fires, at which point the full blast wave is visible and
+        // centered on the bomb.
+        const bool in_delay_window = vessel.triggered && !vessel.ruptured;
+        const ng::f32 mech_pressure     = in_delay_window ? 0.0f : vessel.pressure;
+        const ng::f32 mech_burst_energy = in_delay_window ? 0.0f : vessel.burst_energy;
+
+        ng::f32 shell_push = (mech_pressure * (1.8f + effective_vent * 4.6f) + mech_burst_energy * 18.0f) * vessel.shell_push_scale * dt;
+        ng::f32 crack_drive = (mech_pressure * (0.07f + 0.24f * (1.0f - shell_integrity)) +
+                               mech_burst_energy * 0.85f + shell_hot * 0.05f) * dt;
         for (ng::u32 i = 0; i < vessel.shell.count; ++i) {
             ng::vec2 radial = shell_pos[i] - center;
             ng::f32 r = glm::length(radial);
@@ -2104,7 +2116,7 @@ static void update_pressure_vessels(ng::f32 dt) {
             shell_crack[i] = glm::clamp(shell_crack[i] + crack_drive * (0.55f + weakness * 0.95f), 0.0f, 1.0f);
         }
 
-        ng::f32 core_push = (vessel.pressure * (0.70f + effective_vent * 1.30f) + vessel.burst_energy * 9.0f) * vessel.core_push_scale * dt;
+        ng::f32 core_push = (mech_pressure * (0.70f + effective_vent * 1.30f) + mech_burst_energy * 9.0f) * vessel.core_push_scale * dt;
         ng::f32 forced_temp_gate = glm::smoothstep(0.10f, 0.45f, glm::max(ignite_ramp, flame_drive));
         for (ng::u32 i = 0; i < vessel.core.count; ++i) {
             ng::vec2 radial = core_pos[i] - center;
@@ -2127,7 +2139,7 @@ static void update_pressure_vessels(ng::f32 dt) {
             }
         }
         if (!payload_vel.empty()) {
-            ng::f32 payload_push = (vessel.pressure * (1.2f + effective_vent * 2.1f) + vessel.burst_energy * 26.0f) *
+            ng::f32 payload_push = (mech_pressure * (1.2f + effective_vent * 2.1f) + mech_burst_energy * 26.0f) *
                                    vessel.payload_push_scale * dt;
             for (ng::u32 i = 0; i < payload_vel.size(); ++i) {
                 ng::vec2 radial = payload_pos[i] - center;
@@ -2142,7 +2154,7 @@ static void update_pressure_vessels(ng::f32 dt) {
             }
         }
         if (vessel.side_blast_scale > 1e-4f) {
-            ng::f32 side_push = (vessel.pressure * (0.95f + effective_vent * 1.55f) + vessel.burst_energy * 14.0f) *
+            ng::f32 side_push = (mech_pressure * (0.95f + effective_vent * 1.55f) + mech_burst_energy * 14.0f) *
                                 vessel.side_blast_scale * dt;
             for (ng::u32 i = 0; i < vessel.shell.count; ++i) {
                 ng::vec2 radial = shell_pos[i] - center;
@@ -2163,7 +2175,7 @@ static void update_pressure_vessels(ng::f32 dt) {
             }
         }
         if (vessel.swirl_blast_scale > 1e-4f) {
-            ng::f32 swirl_push = (vessel.pressure * (0.85f + effective_vent * 1.45f) + vessel.burst_energy * 13.0f) *
+            ng::f32 swirl_push = (mech_pressure * (0.85f + effective_vent * 1.45f) + mech_burst_energy * 13.0f) *
                                  vessel.swirl_blast_scale * dt;
             for (ng::u32 i = 0; i < vessel.shell.count; ++i) {
                 ng::vec2 radial = shell_pos[i] - center;
@@ -2187,7 +2199,7 @@ static void update_pressure_vessels(ng::f32 dt) {
         }
         if (vessel.thrust_scale > 1e-4f && vessel.nozzle_open > 1e-4f) {
             ng::vec2 nozzle_dir = -preferred_axis;
-            ng::f32 thrust = vessel.pressure * vessel.nozzle_open * vessel.thrust_scale *
+            ng::f32 thrust = mech_pressure * vessel.nozzle_open * vessel.thrust_scale *
                              (0.24f + nozzle_gate * 0.96f) * dt;
             for (ng::vec2& vel : shell_vel) vel += preferred_axis * thrust * 0.72f;
             for (ng::vec2& vel : core_vel) vel += preferred_axis * thrust * 1.10f;
