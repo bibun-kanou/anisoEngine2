@@ -74,6 +74,10 @@ public:
     void bind_field_for_read(u32 unit = 4) const;
     void bind_total_field_for_read(u32 unit = 4) const;
     void bind_magnetization_for_read(u32 unit = 4) const;
+    // Bind the per-particle persistent magnetization buffer to a given
+    // SSBO binding. Used by mpm_g2p.comp to read M_prev for the
+    // anisotropic dipole-dipole force (chain formation).
+    void bind_m_prev_ssbo(u32 binding) const;
 
     vec4 sample_debug(vec2 world_pos);
     vec4 sample_total_debug(vec2 world_pos);

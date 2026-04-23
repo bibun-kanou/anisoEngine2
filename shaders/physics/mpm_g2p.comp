@@ -95,6 +95,16 @@ uniform float u_magnetic_cursor_strength; // |cursor_strength|
 // so the gate should pass full force through whenever they might exist,
 // or ferro next to a scene magnet (without M held) would feel no force.
 uniform int   u_magnetic_scene_active;
+
+// Per-particle persistent magnetization (written by magnetic_particles.comp).
+// We read it here to compute the ANISOTROPIC dipole-dipole pair force
+// F = ∇(M · H) which, unlike the isotropic (χ/2)∇|H|² Kelvin force, gives
+// head-to-tail attraction + side-by-side repulsion between two particles
+// with aligned M. This is what produces the iconic ferrofluid chain
+// patterns (Rosensweig '85 and many SIGGRAPH ferrofluid papers).
+layout(std430, binding = 22) readonly buffer ParticleMPrev {
+    vec2 particle_m_prev[];
+};
 uniform int   u_keep_colors;
 uniform uint  u_highlight_start; // Global index range to highlight
 uniform uint  u_highlight_end;
@@ -466,6 +476,35 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     return vec4(1.0, 1.0, 1.0, 0.18);
 }
 
+// Anisotropic dipole-dipole pair force for particles carrying a persistent
+// magnetization M_p. Returns F = ∇(M_p · H) computed via 4-sample central
+// differences on the bulk H field. When a neighbor particle raises H
+// locally along the M_p direction, the gradient points toward the neighbor
+// IF M_p is aligned with the displacement (head-to-tail) — attractive along
+// the chain axis. Perpendicular to M_p, the same rasterized neighbor
+// lowers M_p·H at the particle position (the neighbor's contribution to H
+// is along M, perpendicular to r̂ → dot product smaller), so the gradient
+// points AWAY — repulsive side-by-side. That asymmetry is exactly the
+// Rosensweig chain-formation condition.
+vec2 dipole_chain_force(vec2 pos, vec2 M_p, float scale) {
+    if (u_use_real_magnetics == 0) return vec2(0.0);
+    float Mm = length(M_p);
+    if (Mm < 1e-4) return vec2(0.0);
+    ivec2 res = textureSize(u_magnetic_field_tex, 0);
+    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
+    float mh_l = dot(sample_magnetic_field_bulk(pos - vec2(cell.x, 0.0)).xy, M_p);
+    float mh_r = dot(sample_magnetic_field_bulk(pos + vec2(cell.x, 0.0)).xy, M_p);
+    float mh_b = dot(sample_magnetic_field_bulk(pos - vec2(0.0, cell.y)).xy, M_p);
+    float mh_t = dot(sample_magnetic_field_bulk(pos + vec2(0.0, cell.y)).xy, M_p);
+    vec2 grad_mh = vec2((mh_r - mh_l) / max(2.0 * cell.x, 1e-5),
+                        (mh_t - mh_b) / max(2.0 * cell.y, 1e-5));
+    // Scale inversely with |M_p| so the force stays bounded when particles
+    // briefly saturate to very large M (avoids runaway during peak field
+    // moments). The physical force is linear in M, but for a stable sim
+    // we want saturation-like cap.
+    return grad_mh * (scale / (1.0 + 0.15 * Mm));
+}
+
 vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
     if (u_use_real_magnetics == 0 || susceptibility <= 1e-5 || u_magnetic_force_scale <= 1e-5) return vec2(0.0);
 
@@ -702,6 +741,41 @@ void main() {
             if (mat_type == 70u) {
                 new_vel *= (1.0 - 0.35 * u_dt);
             }
+        }
+
+        // Ferrofluid chain formation — anisotropic dipole-dipole pair force
+        // F = ∇(M_p · H). Only applies to liquid ferro materials that can
+        // actually rearrange into chains; SOLIDS with magnetic response
+        // (soft iron, rubber, hard magnet, Curie ferro, superconductor,
+        // eddy copper) keep only the standard Kelvin body force so they
+        // don't fragment along field lines.
+        bool is_fluid_ferro = (mat_type == 31u || mat_type == 67u ||
+                               mat_type == 68u || mat_type == 69u ||
+                               mat_type == 70u);
+        if (is_fluid_ferro) {
+            vec2 M_p = particle_m_prev[p];
+            // Per-material chain-force scale. Heavy ferro dominates because
+            // its saturation M is high; para mist barely chains.
+            float chain_scale;
+            if (mat_type == 67u)      chain_scale = 0.045; // HEAVY: strong chaining
+            else if (mat_type == 70u) chain_scale = 0.030; // STICKY: prefers globules over chains, mild
+            else if (mat_type == 68u) chain_scale = 0.020; // DIAMAG: chains anti-align (still pattern-forming)
+            else if (mat_type == 69u) chain_scale = 0.006; // PARA MIST: barely visible chaining
+            else                      chain_scale = 0.028; // normal ferro
+            vec2 f_chain = dipole_chain_force(pos, M_p, chain_scale);
+            // Gate with the same ext-drive signal so chains only form under
+            // a real external seed — matches the ambient/cursor/scene gate
+            // philosophy of the main Kelvin force.
+            float amb_gate = smoothstep(0.3, 3.0, u_magnetic_ambient_mag);
+            float cur_gate = smoothstep(0.002, 0.05, u_magnetic_cursor_strength);
+            float scn_gate = (u_magnetic_scene_active != 0) ? 1.0 : 0.0;
+            float chain_gate = max(max(amb_gate, cur_gate), scn_gate);
+            f_chain *= chain_gate;
+            // Cap the chain force at ~4 m/s² so it accents the Kelvin
+            // force rather than dominating it.
+            float fc_mag = length(f_chain);
+            if (fc_mag > 4.0) f_chain *= 4.0 / fc_mag;
+            new_vel += f_chain * u_dt;
         }
 
         if (mat_type == 31u || mat_type == 67u || mat_type == 70u) {

@@ -311,6 +311,10 @@ void MagneticField::bind_total_field_for_read(u32 unit) const {
     glBindTextureUnit(unit, field_tex_);
 }
 
+void MagneticField::bind_m_prev_ssbo(u32 binding) const {
+    particle_m_prev_buf_.bind_base(binding);
+}
+
 void MagneticField::bind_magnetization_for_read(u32 unit) const {
     glBindTextureUnit(unit, magnetization_tex_);
 }

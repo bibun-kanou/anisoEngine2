@@ -772,6 +772,9 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         // Scene-active gate: Real Magnetics on => scene SDF sources may
         // contribute non-self gradients, so pass force through.
         g2p_shader_.set_int("u_magnetic_scene_active", mp_params.enabled ? 1 : 0);
+        // Persistent magnetization — for the anisotropic F = ∇(M·H) pair
+        // force that produces ferrofluid chain-formation patterns.
+        magnetic->bind_m_prev_ssbo(22);
     } else {
         g2p_shader_.set_int("u_use_real_magnetics", 0);
         g2p_shader_.set_float("u_magnetic_force_scale", 0.0f);
