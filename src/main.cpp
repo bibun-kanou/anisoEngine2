@@ -5099,6 +5099,90 @@ static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
 //   • Side arrows top/bottom  = side_blast_scale > 0
 //   • Stats table below  = every numeric parameter in a compact 3-col readout
 
+// ---- Flight behavior predictor ----
+// Rolls the vessel gas/pressure equations forward in time WITHOUT running the
+// particle simulation, so we can tell the user "this recipe self-ruptures at
+// ~2.3s of flight" without firing the weapon. This mirrors the real vessel
+// update in main.cpp so what it predicts is what you'll actually see.
+struct RecipePrediction {
+    float peak_pressure   = 0.0f;
+    float rupture_thresh  = 0.0f;
+    bool  self_ruptures   = false;
+    float time_to_rupture = -1.0f;   // seconds; valid only if self_ruptures
+    float steady_pressure = 0.0f;    // pressure at t = 3 s (far into cruise)
+    float propellant_runout = -1.0f; // seconds; valid only if propel on with duration
+};
+
+static RecipePrediction predict_recipe_behavior(const CustomWeaponRecipe& r) {
+    RecipePrediction pred;
+
+    // Match the real rupture formula at fresh shell (integrity=1, hot=0).
+    pred.rupture_thresh = (3.4f + 2.8f) * r.rupture_scale;
+
+    // Starting state matches what fire_projectile sets for CUSTOM vessel_mode.
+    float gas_mass = 0.08f;
+    float pressure = 0.0f;
+    float age      = 0.0f;
+    const float dt       = 0.016f;      // ~60 Hz
+    const float volume   = 0.045f;      // π * radius² with default ball radius
+
+    // Rest temps used once propellant expires. Isolation, when on, pulls fuse
+    // and core back toward these values each frame.
+    const float fuse_working = r.propellant_enabled ? r.fuse_initial_temp
+                                                   : r.fuse_rest_temp;
+    pred.propellant_runout = (r.propellant_enabled && r.propellant_duration > 1e-4f)
+                             ? r.propellant_duration : -1.0f;
+
+    for (int step = 0; step < 5 * 60; ++step) {
+        age += dt;
+
+        // Propellant running?
+        bool prop_active = r.propellant_enabled &&
+                           (pred.propellant_runout < 0.0f || age < pred.propellant_runout);
+        float fuse_T = prop_active ? fuse_working : r.fuse_rest_temp;
+        float core_T = r.core_rest_temp;
+
+        // Same derivations as the real vessel update, minus the GPU-side
+        // particle temperature feedback.
+        float heat_drive = glm::clamp((glm::max(core_T, fuse_T) - 360.0f) / 420.0f, 0.0f, 1.0f);
+        float flame_drive = 0.0f;         // no fuse burn in cruise
+        float nozzle_gate = prop_active ? glm::smoothstep(0.10f, 0.42f,
+                                                          glm::max(flame_drive, heat_drive))
+                                        : 0.0f;
+        float effective_vent = prop_active ? r.nozzle_open * nozzle_gate : 0.0f;
+
+        float gas_source = (0.18f + flame_drive * 1.10f) *
+                           (0.35f + heat_drive * 1.65f) *
+                           r.gas_source_scale;
+        gas_mass += gas_source * dt;
+        gas_mass = glm::max(gas_mass, 0.0f);
+
+        float confinement = 0.85f + 2.30f;  // fresh shell, no shell_hot
+        float target_pressure = gas_mass * confinement *
+                                (1.0f + heat_drive * 1.8f + flame_drive * 1.2f) /
+                                volume;
+        pressure += (target_pressure - pressure) *
+                    glm::min(dt * (2.8f - glm::min(effective_vent, 1.0f) * 1.2f), 1.0f);
+
+        float leak = effective_vent * (0.45f + pressure * 0.16f) * r.leak_scale * dt;
+        gas_mass = glm::max(gas_mass - leak, 0.0f);
+        pressure *= glm::max(1.0f - (0.05f + effective_vent * 1.35f * r.leak_scale) * dt,
+                             0.0f);
+
+        pred.peak_pressure = glm::max(pred.peak_pressure, pressure);
+        if (pressure > pred.rupture_thresh && !pred.self_ruptures) {
+            pred.self_ruptures = true;
+            pred.time_to_rupture = age;
+        }
+
+        if (std::fabs(age - 3.0f) < 0.5f * dt) {
+            pred.steady_pressure = pressure;
+        }
+    }
+
+    return pred;
+}
+
 static const char* custom_shell_name(ng::MPMMaterial m) {
     switch (m) {
         case ng::MPMMaterial::STONEWARE: return "Stoneware";
@@ -5141,6 +5225,50 @@ static void draw_custom_weapon_diagram() {
     else if (r.shell_material == ng::MPMMaterial::CERAMIC)
         shell_col = IM_COL32(220, 210, 220, 255);
     dl->AddRect(a, b, shell_col, 5.0f, 0, shell_thickness);
+
+    // --- Shell material pattern (overlay before anything else) ---
+    // Each material has a subtle background fingerprint inside the shell so
+    // you can see the shell type even without reading the stats table.
+    {
+        const float mx0 = a.x + pad + shell_thickness * 0.5f;
+        const float my0 = a.y + pad + shell_thickness * 0.5f;
+        const float mx1 = b.x - pad - shell_thickness * 0.5f;
+        const float my1 = b.y - pad - shell_thickness * 0.5f;
+        ImU32 pat = IM_COL32(shell_col >> IM_COL32_R_SHIFT & 0xFF,
+                             shell_col >> IM_COL32_G_SHIFT & 0xFF,
+                             shell_col >> IM_COL32_B_SHIFT & 0xFF, 36);
+        if (r.shell_material == ng::MPMMaterial::STONEWARE) {
+            // Speckled dots, random-looking grid
+            for (int iy = 0; iy < 6; ++iy) {
+                for (int ix = 0; ix < 14; ++ix) {
+                    float tx = mx0 + (ix + 0.5f) * (mx1 - mx0) / 14.0f + (iy & 1 ? 3.0f : 0.0f);
+                    float ty = my0 + (iy + 0.5f) * (my1 - my0) / 6.0f;
+                    if (tx < mx1 - 2.0f) dl->AddCircleFilled(ImVec2(tx, ty), 0.9f, pat);
+                }
+            }
+        } else if (r.shell_material == ng::MPMMaterial::CERAMIC) {
+            // Diagonal crosshatch
+            for (int i = -4; i < 30; ++i) {
+                float x0 = mx0 + i * 10.0f, y0 = my0;
+                float x1 = x0 + (my1 - my0), y1 = my1;
+                x0 = glm::clamp(x0, mx0, mx1); x1 = glm::clamp(x1, mx0, mx1);
+                dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), pat, 1.0f);
+            }
+        } else if (r.shell_material == ng::MPMMaterial::TOUGH) {
+            // Thick horizontal lines
+            for (int i = 0; i < 4; ++i) {
+                float ty = my0 + (i + 0.5f) * (my1 - my0) / 4.0f;
+                dl->AddLine(ImVec2(mx0, ty), ImVec2(mx1, ty), pat, 2.0f);
+            }
+        } else if (r.shell_material == ng::MPMMaterial::SEALED_CHARGE) {
+            // Solid tinted fill — denotes an airtight shell
+            dl->AddRectFilled(ImVec2(mx0, my0), ImVec2(mx1, my1),
+                              IM_COL32(shell_col >> IM_COL32_R_SHIFT & 0xFF,
+                                       shell_col >> IM_COL32_G_SHIFT & 0xFF,
+                                       shell_col >> IM_COL32_B_SHIFT & 0xFF, 22),
+                              4.0f);
+        }
+    }
 
     // --- Insulator stripes (thermal isolation) ---
     if (r.thermal_isolation) {
@@ -5343,6 +5471,39 @@ static void draw_custom_weapon_diagram() {
         dl->PathStroke(c, 0, 1.5f);
     }
 
+    // --- Forward-direction chevron on the nose (right side) ---
+    // Makes "the bomb flies to the right; payload is at the nose" unambiguous.
+    {
+        float ax = b.x + 4.0f;
+        float ay = cy;
+        float amp = 8.0f;
+        ImU32 c = IM_COL32(220, 230, 240, 230);
+        dl->PathLineTo(ImVec2(ax,           ay - amp));
+        dl->PathLineTo(ImVec2(ax + amp * 1.2f, ay));
+        dl->PathLineTo(ImVec2(ax,           ay + amp));
+        dl->PathStroke(c, 0, 2.0f);
+    }
+
+    // --- Flight-prediction badge (right side, above the bomb) ---
+    // Runs the vessel equations forward without touching the GPU so you can
+    // see "self-ruptures at 1.8 s" before ever firing.
+    RecipePrediction pred = predict_recipe_behavior(r);
+    {
+        char pbuf[80];
+        ImU32 pc;
+        if (pred.self_ruptures) {
+            snprintf(pbuf, sizeof(pbuf), "SELF-RUPTURES @ %.1fs  (peak P%.1f / threshold %.1f)",
+                     pred.time_to_rupture, pred.peak_pressure, pred.rupture_thresh);
+            pc = IM_COL32(240, 130, 120, 240);
+        } else {
+            snprintf(pbuf, sizeof(pbuf), "FLIGHT SAFE  (steady P%.2f / threshold %.1f)",
+                     pred.steady_pressure, pred.rupture_thresh);
+            pc = IM_COL32(130, 230, 150, 240);
+        }
+        ImVec2 ts = ImGui::CalcTextSize(pbuf);
+        dl->AddText(ImVec2(b.x - ts.x - 4.0f, a.y - ts.y - 2.0f), pc, pbuf);
+    }
+
     // --- Overlay text row below the bomb ---
     float text_y = b.y + 14.0f;
     float text_x = a.x + 4.0f;
@@ -5364,7 +5525,7 @@ static void draw_custom_weapon_diagram() {
                 r.rupture_scale > 6.0f ? IM_COL32(160, 200, 240, 230)
                                        : IM_COL32(230, 180, 120, 230), buf);
 
-    ImGui::Dummy(ImVec2(total_w, bar_h + 30.0f));
+    ImGui::Dummy(ImVec2(total_w, bar_h + 34.0f));
 
     // --- Stats readout table ---
     if (ImGui::BeginTable("##weapon_stats", 4,
@@ -5454,6 +5615,27 @@ static void draw_custom_weapon_diagram() {
             if (r.side_blast_scale > 0.01f) snprintf(buf2, sizeof(buf2), "side %.1f", r.side_blast_scale);
             if (std::fabs(r.axis_bias - 1.0f) > 0.01f) snprintf(buf3, sizeof(buf3), "bias %.2f", r.axis_bias);
             row("Special", buf1, buf2, buf3, IM_COL32(220, 170, 230, 255));
+        }
+
+        // --- Flight-prediction rows ---
+        char pbuf1[48], pbuf2[48], pbuf3[48];
+        float margin = pred.rupture_thresh - pred.peak_pressure;
+        snprintf(pbuf1, sizeof(pbuf1), "peak P %.2f", pred.peak_pressure);
+        snprintf(pbuf2, sizeof(pbuf2), "thresh %.1f", pred.rupture_thresh);
+        snprintf(pbuf3, sizeof(pbuf3), "margin %+.2f", margin);
+        ImU32 pc_col = pred.self_ruptures ? IM_COL32(240, 130, 120, 255)
+                                          : IM_COL32(130, 230, 150, 255);
+        row("Predict P", pbuf1, pbuf2, pbuf3, pc_col);
+
+        if (pred.self_ruptures) {
+            snprintf(pbuf1, sizeof(pbuf1), "at %.2fs", pred.time_to_rupture);
+            row("Predict", "self-rupture", pbuf1,
+                "raise rupture_scale or cut gas", IM_COL32(240, 130, 120, 255));
+        } else if (pred.propellant_runout > 0.0f) {
+            snprintf(pbuf1, sizeof(pbuf1), "propel %.1fs", pred.propellant_runout);
+            row("Predict", "flight safe", pbuf1, "coasts after", IM_COL32(130, 230, 150, 255));
+        } else {
+            row("Predict", "flight safe", "indefinite", "", IM_COL32(130, 230, 150, 255));
         }
 
         ImGui::EndTable();
