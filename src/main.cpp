@@ -5118,14 +5118,16 @@ static void draw_ui_top_bar(ng::f32 frame_ms) {
     ImGui::PopStyleVar(3);
 }
 
-static void draw_environment_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
+static void draw_environment_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
     if (!g_show_environment_window) return;
 
     push_panel_style(accent);
-    // Auto-layout position the first time the window appears, but after that
-    // remember the user's drag/resize choices.
-    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Auto-layout position the first time the window appears AND re-snap to
+    // auto-layout whenever the window transitions hidden -> shown (force_pos).
+    // Otherwise keep whatever position the user dragged it to.
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
     if (!ImGui::Begin("Environment", &g_show_environment_window)) {
         ImGui::End();
         pop_panel_style();
@@ -5180,14 +5182,16 @@ static void draw_environment_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     pop_panel_style();
 }
 
-static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
+static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
     if (!g_show_presets_window) return;
 
     push_panel_style(accent);
-    // Auto-layout position the first time the window appears, but after that
-    // remember the user's drag/resize choices.
-    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Auto-layout position the first time the window appears AND re-snap to
+    // auto-layout whenever the window transitions hidden -> shown (force_pos).
+    // Otherwise keep whatever position the user dragged it to.
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
     if (!ImGui::Begin("Presets", &g_show_presets_window)) {
         ImGui::End();
         pop_panel_style();
@@ -6248,14 +6252,16 @@ static void draw_custom_weapon_editor(CustomWeaponRecipe& r, bool physical_mode)
     ImGui::PopTextWrapPos();
 }
 
-static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
+static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
     if (!g_show_interaction_window) return;
 
     push_panel_style(accent);
-    // Auto-layout position the first time the window appears, but after that
-    // remember the user's drag/resize choices.
-    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Auto-layout position the first time the window appears AND re-snap to
+    // auto-layout whenever the window transitions hidden -> shown (force_pos).
+    // Otherwise keep whatever position the user dragged it to.
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
     if (!ImGui::Begin("Interaction", &g_show_interaction_window)) {
         ImGui::End();
         pop_panel_style();
@@ -6496,14 +6502,16 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     pop_panel_style();
 }
 
-static void draw_backends_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
+static void draw_backends_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
     if (!g_show_backends_window) return;
 
     push_panel_style(accent);
-    // Auto-layout position the first time the window appears, but after that
-    // remember the user's drag/resize choices.
-    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Auto-layout position the first time the window appears AND re-snap to
+    // auto-layout whenever the window transitions hidden -> shown (force_pos).
+    // Otherwise keep whatever position the user dragged it to.
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
     if (!ImGui::Begin("Backends", &g_show_backends_window)) {
         ImGui::End();
         pop_panel_style();
@@ -6581,14 +6589,16 @@ static void draw_backends_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     pop_panel_style();
 }
 
-static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
+static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
     if (!g_show_appearance_window) return;
 
     push_panel_style(accent);
-    // Auto-layout position the first time the window appears, but after that
-    // remember the user's drag/resize choices.
-    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Auto-layout position the first time the window appears AND re-snap to
+    // auto-layout whenever the window transitions hidden -> shown (force_pos).
+    // Otherwise keep whatever position the user dragged it to.
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
     if (!ImGui::Begin("Appearance", &g_show_appearance_window)) {
         ImGui::End();
         pop_panel_style();
@@ -6703,14 +6713,16 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     pop_panel_style();
 }
 
-static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
+static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
     if (!g_show_advanced_window) return;
 
     push_panel_style(accent);
-    // Auto-layout position the first time the window appears, but after that
-    // remember the user's drag/resize choices.
-    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Auto-layout position the first time the window appears AND re-snap to
+    // auto-layout whenever the window transitions hidden -> shown (force_pos).
+    // Otherwise keep whatever position the user dragged it to.
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
     if (!ImGui::Begin("Advanced", &g_show_advanced_window)) {
         ImGui::End();
         pop_panel_style();
@@ -8480,30 +8492,54 @@ int main(int, char**) {
             const ImVec2 advanced_size(360.0f, 700.0f);
             const ImVec2 presets_size(340.0f, 230.0f);
 
+            // Track previous-frame open state per window. When a window
+            // transitions hidden -> shown, we re-snap it to the next_panel
+            // auto-layout slot by passing force_reposition=true for one frame
+            // (which uses ImGuiCond_Always instead of ImGuiCond_FirstUseEver).
+            // This is what restores "new windows try to find empty space"
+            // behavior after the switch to draggable windows.
+            static bool prev_show_interaction = false;
+            static bool prev_show_environment = false;
+            static bool prev_show_backends    = false;
+            static bool prev_show_appearance  = false;
+            static bool prev_show_advanced    = false;
+            static bool prev_show_presets     = false;
+            auto just_opened = [](bool show, bool& prev) {
+                bool opened = show && !prev;
+                prev = show;
+                return opened;
+            };
+
             if (g_show_interaction_window) {
                 ImVec2 pos = next_panel_position(interaction_size, cursor_x, cursor_y, row_height, start_x, max_x);
-                draw_interaction_window(pos, interaction_size, kInteractionAccent);
-            }
+                bool fp = just_opened(g_show_interaction_window, prev_show_interaction);
+                draw_interaction_window(pos, interaction_size, kInteractionAccent, fp);
+            } else { prev_show_interaction = false; }
             if (g_show_environment_window) {
                 ImVec2 pos = next_panel_position(environment_size, cursor_x, cursor_y, row_height, start_x, max_x);
-                draw_environment_window(pos, environment_size, kEnvironmentAccent);
-            }
+                bool fp = just_opened(g_show_environment_window, prev_show_environment);
+                draw_environment_window(pos, environment_size, kEnvironmentAccent, fp);
+            } else { prev_show_environment = false; }
             if (g_show_backends_window) {
                 ImVec2 pos = next_panel_position(backends_size, cursor_x, cursor_y, row_height, start_x, max_x);
-                draw_backends_window(pos, backends_size, kBackendsAccent);
-            }
+                bool fp = just_opened(g_show_backends_window, prev_show_backends);
+                draw_backends_window(pos, backends_size, kBackendsAccent, fp);
+            } else { prev_show_backends = false; }
             if (g_show_appearance_window) {
                 ImVec2 pos = next_panel_position(appearance_size, cursor_x, cursor_y, row_height, start_x, max_x);
-                draw_appearance_window(pos, appearance_size, kAppearanceAccent);
-            }
+                bool fp = just_opened(g_show_appearance_window, prev_show_appearance);
+                draw_appearance_window(pos, appearance_size, kAppearanceAccent, fp);
+            } else { prev_show_appearance = false; }
             if (g_show_advanced_window) {
                 ImVec2 pos = next_panel_position(advanced_size, cursor_x, cursor_y, row_height, start_x, max_x);
-                draw_advanced_window(pos, advanced_size, kAdvancedAccent);
-            }
+                bool fp = just_opened(g_show_advanced_window, prev_show_advanced);
+                draw_advanced_window(pos, advanced_size, kAdvancedAccent, fp);
+            } else { prev_show_advanced = false; }
             if (g_show_presets_window) {
                 ImVec2 pos = next_panel_position(presets_size, cursor_x, cursor_y, row_height, start_x, max_x);
-                draw_presets_window(pos, presets_size, kPresetsAccent);
-            }
+                bool fp = just_opened(g_show_presets_window, prev_show_presets);
+                draw_presets_window(pos, presets_size, kPresetsAccent, fp);
+            } else { prev_show_presets = false; }
         }
 
         if (g_show_pipeline_prev && !g_show_pipeline) {
