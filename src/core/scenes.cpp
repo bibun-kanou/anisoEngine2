@@ -5056,6 +5056,253 @@ static void load_fix_test_sph_equil(ParticleBuffer& particles, SPHSolver& sph,
                              MPMMaterial::SPH_WATER, 360.0f);
 }
 
+// ================================================================
+// Huge fields. Even bigger than the XL series (world ~24 x 11) so
+// launcher2 weapons have actual flight distance to show character,
+// and impact/blast effects don't immediately fill the scene.
+// ================================================================
+
+static void load_huge_weapon_range(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                   MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                   CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls_extents(sdf, vec2(-11.6f, -2.6f), vec2(11.6f, 7.4f),
+                                SDFField::MaterialPresetID::BRONZE_BALANCED, 0.18f);
+
+    // A few spaced-out obstacles so weapons can collide with geometry along the way.
+    sdf.add_box(vec2(-4.5f, -1.70f), vec2(0.10f, 0.80f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Left Pillar", "Bronze pillar for lateral-burst tests and ricochet reads.");
+    sdf.add_box(vec2(-2.6f, 2.80f), vec2(0.08f, 0.70f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Upper Left Hanger", "Low overhead plate so rockets that arc up catch something on the way out.");
+    sdf.add_box(vec2(2.4f, -1.50f), vec2(0.10f, 1.00f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Mid Pillar", "Central pillar splitting the range into a near half and a far half.");
+    sdf.add_segment(vec2(5.40f, -2.56f), vec2(7.10f, -0.80f), 0.08f,
+                    SDFField::MaterialPresetID::BRONZE_BALANCED,
+                    "Ramp", "Angled ramp for the gravity penetrator — fire it up and over so it plants on top.");
+    sdf.add_box(vec2(7.80f, -0.80f), vec2(1.20f, 0.08f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Ramp Plateau", "Flat landing zone for gravity-penetrator tests.");
+    sdf.add_box(vec2(9.80f, -1.20f), vec2(0.10f, 1.40f),
+                SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                "Rear Catch Wall", "Far catch wall — heat sink so residual fragments and plumes cool cleanly against it.");
+    sdf.add_box(vec2(0.0f, 6.90f), vec2(11.4f, 0.10f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Roof", "High roof so blast plumes have room to rise and dissipate.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    mpm.params().heat_source_pos = vec2(-20.0f, -20.0f);
+    mpm.params().heat_source_radius = 0.05f;
+    mpm.params().heat_source_temp = 300.0f;
+
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+
+    struct Target {
+        const char* label;
+        const char* summary;
+        MPMMaterial material;
+        f32 E;
+        f32 density;
+        vec2 min;
+        vec2 max;
+    };
+    const Target targets[] = {
+        {"Near Stoneware Wall",
+         "A close thin stoneware panel. Use it to gauge hard-contact detonation behavior on a solid non-elastic target.",
+         MPMMaterial::STONEWARE, 40000.0f, 3.0f, vec2(-7.2f, -2.48f), vec2(-6.9f, 0.20f)},
+        {"Ceramic Pillar",
+         "Tall brittle ceramic pillar at mid range. Should shed chunky fragments when struck.",
+         MPMMaterial::CERAMIC, 34000.0f, 2.7f, vec2(-0.20f, -2.48f), vec2(0.15f, 2.20f)},
+        {"Tough Mid Block",
+         "Thick tough slab. Good for reading how much a contact blast breaches vs just scorches.",
+         MPMMaterial::TOUGH, 48000.0f, 4.6f, vec2(3.40f, -2.48f), vec2(3.85f, 1.20f)},
+        {"Ramp-Top Witness",
+         "Soft brittle witness on top of the ramp plateau. Aim a gravity penetrator over the ramp — it should plant then drive downward through this.",
+         MPMMaterial::BRITTLE, 28000.0f, 2.2f, vec2(7.30f, -0.72f), vec2(8.30f, -0.16f)},
+        {"Far Brittle Sheet",
+         "Far brittle witness sheet. Shows fragment travel over long distance; fragile enough to read even mild residual pressure.",
+         MPMMaterial::BRITTLE, 26000.0f, 2.0f, vec2(9.10f, -2.48f), vec2(9.25f, 0.00f)},
+        {"Hanging Firm Slab",
+         "A firm ceiling slab to test vertical / arcing shots.",
+         MPMMaterial::TOUGH, 44000.0f, 3.6f, vec2(-2.80f, 2.00f), vec2(-2.35f, 2.78f)},
+    };
+    for (const Target& t : targets) {
+        mpm.params().youngs_modulus = t.E;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, t.min, t.max, sp,
+                        t.material, 300.0f, vec2(1, 0), t.density);
+        register_scene_mpm_batch(creation, t.label, t.summary,
+                                 particles, before, t.material,
+                                 t.E, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), t.density);
+    }
+
+    // A soft-gel witness next to the wall. Perfect target for the crack-rate sensor
+    // work — hard impacts bounce, but the bomb should still crack against the gel's
+    // deformation over multiple frames.
+    mpm.params().youngs_modulus = 8000.0f;
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(1.50f, -2.48f), vec2(2.20f, -1.10f), sp,
+                    MPMMaterial::IMPACT_GEL, 300.0f, vec2(1, 0), 1.4f);
+    register_scene_mpm_batch(creation, "Soft Impact Gel",
+                             "Squishy target — a bomb that hits this should NOT bounce off. Crack-rate sensor should still fire after ~0.2s of compression.",
+                             particles, before, MPMMaterial::IMPACT_GEL,
+                             8000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.4f);
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+static void load_huge_impact_playground(ParticleBuffer& particles, SPHSolver& sph,
+                                        MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                        CreationState* creation) {
+    sdf.clear();
+    add_floor_and_walls_extents(sdf, vec2(-11.6f, -2.6f), vec2(11.6f, 7.4f),
+                                SDFField::MaterialPresetID::BRONZE_BALANCED, 0.18f);
+    // Mid-air platform for object stacking experiments.
+    sdf.add_box(vec2(-4.00f, 1.40f), vec2(2.40f, 0.10f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Left Platform", "Raised platform for stacked / balanced experiments.");
+    sdf.add_box(vec2(4.20f, 1.70f), vec2(2.10f, 0.10f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Right Platform", "Higher platform for drop and roll experiments.");
+    sdf.add_segment(vec2(0.80f, -2.56f), vec2(3.60f, -1.00f), 0.08f,
+                    SDFField::MaterialPresetID::BRONZE_BALANCED,
+                    "Low Ramp", "Curve-in ramp for bouncing and sliding tests.");
+    sdf.add_circle(vec2(-6.40f, -1.30f), 0.55f,
+                   SDFField::MaterialPresetID::BRONZE_BALANCED,
+                   "Bump", "Rounded bump — fun for bouncing elastic balls onto.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    mpm.params().heat_source_pos = vec2(-20.0f, -20.0f);
+    mpm.params().heat_source_radius = 0.05f;
+    mpm.params().heat_source_temp = 300.0f;
+
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+
+    // Elastic bouncers — a row of balls, different sizes.
+    const f32 elastic_x[] = {-9.6f, -8.8f, -7.9f, -6.9f};
+    const f32 elastic_r[] = { 0.22f, 0.30f, 0.26f, 0.36f};
+    for (int i = 0; i < 4; ++i) {
+        mpm.params().youngs_modulus = 55000.0f;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_circle(particles, vec2(elastic_x[i], 0.60f + (i & 1) * 1.20f),
+                         elastic_r[i], sp,
+                         MPMMaterial::ELASTIC, 300.0f, vec2(1, 0), 2.0f);
+        register_scene_mpm_batch(creation, "Elastic Bouncer",
+                                 "High-stiffness rubber ball. Bounces cleanly off the floor and ramps. Useful for contact-trigger crack tests — it accumulates crack slowly on impact.",
+                                 particles, before, MPMMaterial::ELASTIC,
+                                 55000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 2.0f);
+    }
+
+    // Firm tough columns on the left platform.
+    for (int i = 0; i < 3; ++i) {
+        mpm.params().youngs_modulus = 46000.0f;
+        f32 x0 = -5.60f + i * 1.00f;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, vec2(x0, 1.55f), vec2(x0 + 0.45f, 3.20f), sp,
+                        MPMMaterial::TOUGH, 300.0f, vec2(1, 0), 4.0f);
+        register_scene_mpm_batch(creation, "Tough Column",
+                                 "Firm column on the left platform. Retains shape under most impacts; compare its debris with the brittle column next to it.",
+                                 particles, before, MPMMaterial::TOUGH,
+                                 46000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 4.0f);
+    }
+
+    // Brittle columns between the tough ones for fracture comparison.
+    for (int i = 0; i < 2; ++i) {
+        mpm.params().youngs_modulus = 32000.0f;
+        f32 x0 = -5.10f + i * 1.00f;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, vec2(x0, 1.55f), vec2(x0 + 0.35f, 3.00f), sp,
+                        MPMMaterial::BRITTLE, 300.0f, vec2(1, 0), 2.5f);
+        register_scene_mpm_batch(creation, "Brittle Column",
+                                 "Fragile column — cracks into chunkier debris than the tough column next to it.",
+                                 particles, before, MPMMaterial::BRITTLE,
+                                 32000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 2.5f);
+    }
+
+    // Flammable wood logs stacked on the right platform.
+    for (int i = 0; i < 3; ++i) {
+        mpm.params().youngs_modulus = 18000.0f;
+        f32 y0 = 1.85f + i * 0.38f;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, vec2(3.60f, y0), vec2(4.80f, y0 + 0.30f), sp,
+                        MPMMaterial::BURNING, 300.0f, vec2(1, 0), 1.6f);
+        register_scene_mpm_batch(creation, "Wood Log",
+                                 "Burning-style flammable log. Heat from nearby blasts or lamp-oil spills should ignite it.",
+                                 particles, before, MPMMaterial::BURNING,
+                                 18000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.6f);
+    }
+
+    // Paper piles (easy fuel) on the right platform.
+    for (int i = 0; i < 2; ++i) {
+        mpm.params().youngs_modulus = 9000.0f;
+        f32 x0 = 5.00f + i * 0.70f;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, vec2(x0, 1.85f), vec2(x0 + 0.45f, 2.30f), sp,
+                        MPMMaterial::BURNING, 300.0f, vec2(1, 0), 0.6f);
+        register_scene_mpm_batch(creation, "Paper Pile",
+                                 "Light-density flammable pad. Cheap kindling for chain ignition tests.",
+                                 particles, before, MPMMaterial::BURNING,
+                                 9000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.6f);
+    }
+
+    // A lamp-oil pool on the low ramp for SPH fire spread.
+    SPHParams sph_p = sph.params();
+    sph_p.enable_thermal = true;
+    sph_p.surface_tension = 0.85f;
+    sph_p.codim_enabled = false;
+    sph.set_params(sph_p);
+    const f32 sph_sp = sph.params().smoothing_radius * 0.5f;
+    u32 sph_before = particles.range(SolverType::SPH).count;
+    sph.spawn_block(particles, vec2(1.20f, -2.40f), vec2(3.40f, -1.70f), sph_sp);
+    u32 sph_off = particles.range(SolverType::SPH).offset + sph_before;
+    u32 sph_cnt = particles.range(SolverType::SPH).count - sph_before;
+    apply_sph_batch_properties(particles, sph, sph_off, sph_cnt,
+                               MPMMaterial::SPH_BURNING_OIL, 320.0f, 8.0f, 0.12f,
+                               vec4(0.84f, 0.52f, 0.16f, 1.0f));
+    register_scene_sph_batch(creation, "Burning Oil Pool",
+                             "SPH burning oil slick. Ignites from nearby heat and spreads flame across the floor. Good for chain-ignition tests with the logs above.",
+                             particles, sph_before, vec4(0.84f, 0.52f, 0.16f, 1.0f),
+                             0.48f, "Fill across the ramp for a wider pool.",
+                             MPMMaterial::SPH_BURNING_OIL, 320.0f);
+
+    // A row of firecracker pellets under the right platform — touch them off with
+    // a nearby blast to demo chain reactions.
+    for (int i = 0; i < 5; ++i) {
+        mpm.params().youngs_modulus = 14000.0f;
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_circle(particles, vec2(3.00f + i * 0.45f, -2.30f), 0.12f, sp,
+                         MPMMaterial::FIRECRACKER, 300.0f, vec2(1, 0), 1.2f);
+        register_scene_mpm_batch(creation, "Firecracker Pellet",
+                                 "Reactive FIRECRACKER pellet. Cooks off on nearby heat or shock — chain reactions in a row.",
+                                 particles, before, MPMMaterial::FIRECRACKER,
+                                 14000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.2f);
+    }
+
+    // A stack of firm boxes in the middle-right — classic "blast whatever" pile.
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 3 - (i / 2); ++j) {
+            mpm.params().youngs_modulus = 40000.0f;
+            f32 x0 = 6.0f + j * 0.52f;
+            f32 y0 = -2.30f + i * 0.42f;
+            u32 before = particles.range(SolverType::MPM).count;
+            mpm.spawn_block(particles, vec2(x0, y0), vec2(x0 + 0.40f, y0 + 0.34f), sp,
+                            MPMMaterial::TOUGH, 300.0f, vec2(1, 0), 3.2f);
+            register_scene_mpm_batch(creation, "Firm Crate",
+                                     "Stacked tough crate. Good for throwing blasts at and watching the whole stack topple.",
+                                     particles, before, MPMMaterial::TOUGH,
+                                     40000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 3.2f);
+        }
+    }
+
+    mpm.params().youngs_modulus = old_E;
+}
+
 // ---- dispatch ----
 void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
                 MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
@@ -5353,6 +5600,12 @@ void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
         break;
     case SceneID::FIX_TEST_SPH_EQUIL:
         load_fix_test_sph_equil(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::HUGE_WEAPON_RANGE:
+        load_huge_weapon_range(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::HUGE_IMPACT_PLAYGROUND:
+        load_huge_impact_playground(particles, sph, mpm, grid, sdf, creation);
         break;
     }
 }

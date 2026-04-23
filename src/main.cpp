@@ -229,6 +229,22 @@ struct PressureVesselRecord {
     // update so the next frame can compute a derivative.
     ng::f32 prev_shell_speed = 0.0f;
     ng::f32 prev_crack_avg = 0.0f;
+
+    // B2 (Internal Thermal Isolation). When true, each frame the fuse and core
+    // temperatures are pulled back down toward their "rest" values — this
+    // simulates a thermal barrier that prevents external shell heat (impact
+    // contact heating, ambient cook, etc.) from reaching the charge. The pull
+    // is one-sided (only cools, never heats) so the rocket's own fuse can still
+    // maintain its working temperature. Disabled automatically once the vessel
+    // is triggered, so combustion can proceed normally.
+    bool internal_thermal_isolation = false;
+    ng::f32 fuse_rest_temp = 300.0f;
+    ng::f32 core_rest_temp = 300.0f;
+
+    // B6 (Propellant duration). When > 0, nozzle_open is forced to zero after
+    // the vessel has been alive for this many seconds — i.e. the rocket runs
+    // out of propellant. 0 (default) = propellant never expires.
+    ng::f32 propellant_duration = 0.0f;
 };
 
 enum class HoverKind { NONE, BATCH, SDF };
@@ -501,6 +517,20 @@ static SceneSpaceConfig scene_space_config(ng::SceneID scene) {
         cfg.sph_bound_max = ng::vec2(6.6f, 5.2f);
         cfg.camera_pos = ng::vec2(0.2f, 0.6f);
         cfg.camera_zoom = 88.0f;
+        break;
+    case ng::SceneID::HUGE_WEAPON_RANGE:
+    case ng::SceneID::HUGE_IMPACT_PLAYGROUND:
+        // Even bigger than the XL series. Huge means ~24 wide x 11 tall, giving
+        // long flight lines for weapons + space for chain reactions without the
+        // world filling up with smoke.
+        cfg.sdf_world_min = ng::vec2(-12.0f, -3.0f);
+        cfg.sdf_world_max = ng::vec2(12.0f, 8.0f);
+        cfg.grid_world_min = ng::vec2(-12.3f, -3.3f);
+        cfg.grid_world_max = ng::vec2(12.3f, 8.3f);
+        cfg.sph_bound_min = ng::vec2(-11.7f, -2.7f);
+        cfg.sph_bound_max = ng::vec2(11.7f, 7.3f);
+        cfg.camera_pos = ng::vec2(0.0f, 1.5f);
+        cfg.camera_zoom = 52.0f;
         break;
     default:
         break;
@@ -1816,6 +1846,28 @@ static void update_pressure_vessels(ng::f32 dt) {
             return sum / static_cast<ng::f32>(data.size());
         };
 
+        // B2: Internal thermal isolation. Before any temperature-derived values
+        // are sampled, pull the fuse and core temps back down toward their rest
+        // values — but only downward, never up (so the fuse can still sit hot
+        // at its working temperature on its own). Disabled once the vessel is
+        // triggered, so a real fuse burn still propagates afterwards. Strong
+        // pull (4/s) so single-frame contact heat spikes are erased quickly.
+        if (vessel.internal_thermal_isolation && !vessel.triggered && !vessel.ruptured) {
+            ng::f32 alpha = glm::clamp(4.0f * dt, 0.0f, 0.5f);
+            for (ng::f32& t : fuse_temp) {
+                if (t > vessel.fuse_rest_temp) t = glm::mix(t, vessel.fuse_rest_temp, alpha);
+            }
+            for (ng::f32& t : core_temp) {
+                if (t > vessel.core_rest_temp) t = glm::mix(t, vessel.core_rest_temp, alpha);
+            }
+        }
+
+        // B6: Propellant duration cutoff. Once the rocket has burned through
+        // its propellant, zero the nozzle so no more thrust / gas venting.
+        if (vessel.propellant_duration > 1e-4f && vessel.age > vessel.propellant_duration) {
+            vessel.nozzle_open = 0.0f;
+        }
+
         ng::f32 shell_temp_avg = avg_scalar(shell_temp);
         ng::f32 core_temp_avg = avg_scalar(core_temp);
         ng::f32 core_cooked = avg_scalar(core_damage);
@@ -2973,6 +3025,10 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.impact_rupture = true;                 // enable sensors
                 vessel.impact_crack_rate_threshold = 1.5f;    // B3: ~1.5 crack/s
                 vessel.trigger_to_rupture_delay = 0.04f;      // B5: 40 ms fuse
+                vessel.internal_thermal_isolation = true;     // B2
+                vessel.fuse_rest_temp = 490.0f;
+                vessel.core_rest_temp = 285.0f;
+                vessel.propellant_duration = 2.5f;            // B6: burn for 2.5 s
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 140000.0f;
                 payload_density = 6.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
@@ -3069,6 +3125,9 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.impact_rupture = true;
                 vessel.impact_crack_rate_threshold = 1.3f;  // B3: slightly looser
                 vessel.trigger_to_rupture_delay = 0.03f;    // B5: snappy
+                vessel.internal_thermal_isolation = true;   // B2
+                vessel.fuse_rest_temp = 470.0f;
+                vessel.core_rest_temp = 290.0f;
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 128000.0f;
                 payload_density = 5.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
@@ -3104,6 +3163,9 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.impact_crack_rate_threshold = 1.8f;  // B3: firmer impact needed
                 vessel.trigger_to_rupture_delay = 0.12f;    // B5: long dig-in delay
                 vessel.penetrate_on_impact = true;
+                vessel.internal_thermal_isolation = true;   // B2
+                vessel.fuse_rest_temp = 500.0f;
+                vessel.core_rest_temp = 290.0f;
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 162000.0f;
                 payload_density = 7.4f * glm::max(g_ball_weight, 0.5f) / 6.0f;
@@ -3139,6 +3201,9 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.impact_rupture = true;
                 vessel.impact_crack_rate_threshold = 1.3f;  // B3
                 vessel.trigger_to_rupture_delay = 0.02f;    // B5: instant pop
+                vessel.internal_thermal_isolation = true;   // B2
+                vessel.fuse_rest_temp = 440.0f;
+                vessel.core_rest_temp = 290.0f;
             }
 
             switch (preset_id) {

@@ -41,9 +41,10 @@ enum class SceneID : u32 {
     THERMAL_VERIFY_IMPACT_RINGDOWN=89,
     FIX_TEST_BIO_HEAL=90, FIX_TEST_BLAST_COOLDOWN=91,
     FIX_TEST_COLLISION_HEAT=92, FIX_TEST_FERRO_DEMAG=93,
-    FIX_TEST_SPH_EQUIL=94
+    FIX_TEST_SPH_EQUIL=94,
+    HUGE_WEAPON_RANGE=95, HUGE_IMPACT_PLAYGROUND=96
 };
-constexpr int SCENE_COUNT = 95;
+constexpr int SCENE_COUNT = 97;
 inline const char* scene_names[] = {
     "Default", "Thermal Furnace", "Fracture Test", "Melting",
     "Dam Break", "Stiff Objects", "Heat Ramp", "Fire & Forge",
@@ -84,7 +85,9 @@ inline const char* scene_names[] = {
     "Fix Test: Blast Cooldown [new]",
     "Fix Test: Collision Heat Rack [new]",
     "Fix Test: Ferro Demag Spikes [new]",
-    "Fix Test: SPH Thermal Equilibrium [new]"
+    "Fix Test: SPH Thermal Equilibrium [new]",
+    "Huge Weapon Range [new]",
+    "Huge Impact Playground [new]"
 };
 
 void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
