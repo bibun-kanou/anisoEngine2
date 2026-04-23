@@ -55,6 +55,13 @@ public:
         f32 cursor_falloff_radius = 0.65f;
         f32 cursor_strength = 0.0f;
         CursorFieldType cursor_field_type = CursorFieldType::PROBE_POLE;
+        // Uniform ambient H field added on top of everything else. Real-world
+        // analog is the Earth's ~50 µT ambient magnetic field, which is what
+        // gives a puddle of ferrofluid a "default" field to magnetize in,
+        // letting it self-organize into Rosensweig spikes and small clumps
+        // without any external magnet. Zero by default — toggled and tuned
+        // through the "Ambient Field" UI.
+        vec2 ambient_H = vec2(0.0f, 0.0f);
     };
 
     void init(const Config& config);
@@ -79,7 +86,11 @@ public:
     bool active() const {
         return params_.enabled
             || std::abs(params_.cursor_strength) > 1e-4f
-            || params_.debug_force_active;
+            || params_.debug_force_active
+            // Ambient field is an independent source — must keep the
+            // solver running so it gets rasterized + reaches ferrofluid.
+            || (params_.ambient_H.x * params_.ambient_H.x +
+                params_.ambient_H.y * params_.ambient_H.y) > 1e-8f;
     }
 
 private:

@@ -273,6 +273,14 @@ static bool g_show_mag_field_overlay = false;
 // Exposure for the overlay visualization (1.0 = normal). Higher values expose
 // subtle far-field regions that would otherwise be invisible.
 static float g_mag_field_exposure = 1.0f;
+// Uniform ambient H field — Earth-analog background seed that lets
+// ferrofluid magnetize and form Rosensweig patterns on its own, without any
+// scene magnet or M held. Off by default; toggled + tuned in the Overlays /
+// Debug section of the Environment window. `g_ambient_field_angle_deg` is
+// 0° = +X (right), 90° = +Y (up in worldspace).
+static bool  g_ambient_field_enabled = false;
+static float g_ambient_field_strength = 4.0f;
+static float g_ambient_field_angle_deg = 90.0f;
 static bool g_show_pipeline = false;
 static bool g_show_pipeline_prev = false;
 static bool g_show_interaction_window = false;
@@ -6805,13 +6813,35 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
         // renders nothing — that's not a bug, just physics. Hold M or place
         // a scene magnet to seed a field.
         ImGui::Checkbox("Show Magnetic Field", &g_show_mag_field_overlay);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader. Shows the field produced by scene magnets + ferrofluid magnetization. Requires at least one magnetic source (scene magnet, or M held) to show anything; ferrofluid alone produces no field because it needs an external seed to magnetize.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader. Shows the field produced by scene magnets, the ambient field (below), and ferrofluid magnetization. Ferrofluid alone produces no field unless it has a seed — enable Ambient Field below (or hold M / place a scene magnet).");
         if (g_show_mag_field_overlay) {
             ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 500.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up (into the hundreds) to see weak ferrofluid-induced fields; real scene magnets usually only need ~5-20.");
             // Keep the solver running each frame so the overlay always has a
             // live field to draw, even without holding M or arming Real Magnetics.
             g_magnetic.params().debug_force_active = true;
+        }
+
+        // Ambient Field — Earth-analog uniform background H. Without this,
+        // ferrofluid in a scene with no external magnet cannot magnetize
+        // (Langevin(0) = 0 -> M = 0 -> field stays zero forever). Enable it
+        // and ferrofluid will self-organize into Rosensweig spikes and
+        // clump against walls/itself on its own. Off by default so physics
+        // stays neutral unless the user opts in.
+        ImGui::Checkbox("Ambient Field", &g_ambient_field_enabled);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adds a uniform background H field across the whole simulation. Real-world analog: Earth's magnetic field. Gives ferrofluid something to magnetize in, so a puddle poured with no external magnet can still form spikes and clumps on its own.");
+        if (g_ambient_field_enabled) {
+            ImGui::SliderFloat("Ambient Strength", &g_ambient_field_strength, 0.1f, 40.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Magnitude of the uniform H. Typical values: 1-3 for a subtle background, 5-15 for visible Rosensweig spikes, 20+ for very dense columnar ferrofluid patterns.");
+            ImGui::SliderFloat("Ambient Angle", &g_ambient_field_angle_deg, 0.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Direction of the uniform H. 0=right, 90=up, 180=left, 270=down (worldspace). Most scenes look natural with 90 (spikes grow upward).");
+            // Write the ambient_H param from strength+angle, and keep the
+            // solver running so the overlay + ferrofluid see it each frame.
+            float rad = g_ambient_field_angle_deg * 3.14159265358979f / 180.0f;
+            g_magnetic.params().ambient_H = ng::vec2(std::cos(rad), std::sin(rad)) * g_ambient_field_strength;
+            g_magnetic.params().debug_force_active = true;
+        } else {
+            g_magnetic.params().ambient_H = ng::vec2(0.0f, 0.0f);
         }
 
         ImGui::Checkbox("Magnetic Debug", &g_show_magnetic_debug);

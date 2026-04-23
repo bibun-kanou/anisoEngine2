@@ -8,6 +8,11 @@ layout(rgba32f, binding = 1) uniform image2D u_field_tex;
 uniform ivec2 u_resolution;
 uniform vec2 u_world_min;
 uniform vec2 u_world_max;
+// Uniform ambient H field added to every cell. Lets ferrofluid magnetize
+// in a "background" field (Earth-analog) and self-organize into Rosensweig
+// patterns without needing a scene magnet or M held. Set to vec2(0) when
+// the ambient-field UI is off — in that case this adds nothing.
+uniform vec2 u_ambient_H;
 
 float sample_phi(ivec2 px) {
     px = clamp(px, ivec2(0), u_resolution - ivec2(1));
@@ -29,6 +34,7 @@ void main() {
 
     vec2 H = vec2(-(phi_r - phi_l) * inv2dx,
                   -(phi_t - phi_b) * inv2dy);
+    H += u_ambient_H;
     float h2 = dot(H, H);
     imageStore(u_field_tex, pixel, vec4(H, sqrt(max(h2, 0.0)), h2));
 }

@@ -241,6 +241,10 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         field_shader_.set_ivec2("u_resolution", resolution_);
         field_shader_.set_vec2("u_world_min", world_min_);
         field_shader_.set_vec2("u_world_max", world_max_);
+        // Added to every cell after grad(-phi). Seeds the ferrofluid so a
+        // free-standing puddle can magnetize and form Rosensweig spikes
+        // without any external magnet.
+        field_shader_.set_vec2("u_ambient_H", params_.ambient_H);
         field_shader_.dispatch_2d(static_cast<u32>(resolution_.x), static_cast<u32>(resolution_.y));
         ComputeShader::barrier_image();
     };
