@@ -431,6 +431,9 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 68u) return vec4(0.04, 0.55, 0.78, 0.08); // diamagnetic: cool conductive response
     if (mat_type == 69u) return vec4(0.02, 0.35, 0.90, 0.03); // para mist: airy, low thermal coupling
     if (mat_type == 70u) return vec4(0.00, 0.68, 0.58, 0.05); // sticky ferro: dense and slow thermally
+    if (mat_type == 71u) return vec4(0.00, 0.45, 0.95, 0.02); // superconductor: high conductivity cold-biased
+    if (mat_type == 72u) return vec4(0.02, 0.72, 0.84, 0.06); // Curie ferro: moderate (transitions thermally)
+    if (mat_type == 73u) return vec4(0.02, 0.95, 0.82, 0.04); // eddy copper: highly thermally coupled
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -615,6 +618,9 @@ void main() {
     else if (mat_type == 68u) max_speed_cells = 0.50; // diamagnetic: moderate cap, can drift away
     else if (mat_type == 69u) max_speed_cells = 1.40; // para mist: light aerosol, moves briskly
     else if (mat_type == 70u) max_speed_cells = 0.38; // sticky ferro: stays cohesive, slow
+    else if (mat_type == 71u) max_speed_cells = 0.85; // superconductor: rigid solid, typical solid cap
+    else if (mat_type == 72u) max_speed_cells = 0.65; // Curie ferro: solidly ferromagnetic below T_c
+    else if (mat_type == 73u) max_speed_cells = 1.00; // eddy copper: a bit faster than ferro (heating comes from motion)
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -653,6 +659,7 @@ void main() {
     if (u_use_real_magnetics != 0) {
         float susceptibility = 0.0;
         float max_mag_force = 0.0;
+        float mag_temp = temperatures[p]; // temperature sampled early for thermally-gated magnetic materials
         // Magnetic materials. `max_mag_force` caps peak body-force acceleration in m/s².
         // Gravity is ~9.81, so to climb against it the ceiling must exceed that.
         // Older values (1.8, 5.5) were deliberately below gravity which is why
@@ -665,6 +672,18 @@ void main() {
         else if (mat_type == 68u) { susceptibility = -0.55; max_mag_force = 12.0; } // DIAMAGNETIC: negative chi — particles pushed AWAY from field gradients (pool at edge of magnets)
         else if (mat_type == 69u) { susceptibility = 0.08; max_mag_force = 4.0; }   // PARA_MIST: very light, gentle drift along field lines, barely accelerates
         else if (mat_type == 70u) { susceptibility = 0.55; max_mag_force = 18.0; }  // STICKY_FERRO: strong attraction but stays cohesive — clumps into globules
+        else if (mat_type == 71u) {                                                 // SUPERCONDUCTOR: Meissner — huge negative chi below T_c, zero above
+            float active_sc = smoothstep(188.0, 172.0, mag_temp);                   // matches SUPERCONDUCTOR_T_C in magnetic_particles.comp (with hysteresis band)
+            susceptibility = -1.8 * active_sc;
+            max_mag_force = 38.0 * active_sc;
+        }
+        else if (mat_type == 72u) {                                                 // CURIE_FERRO: ferromagnet below T_Curie, zero above
+            float below_curie = smoothstep(705.0, 655.0, mag_temp);
+            susceptibility = 0.72 * below_curie;
+            max_mag_force = 22.0 * below_curie;
+        }
+        // MAT_EDDY_COPPER (73) — purely conductive, no Kelvin susceptibility.
+        // The eddy heating is computed below, outside this force block.
         // abs() so diamagnetic (negative chi) also gets the force path.
         // magnetic_body_force produces a signed force via `f = 0.5 * chi * ...`,
         // so negative chi correctly produces repulsion away from field gradients.
@@ -689,6 +708,23 @@ void main() {
                                  + 0.70 * smoothstep(0.18, 1.1, hmag);
             float amplify = (mat_type == 67u) ? 3.2 : 1.1;
             new_vel += ferro_surface_force(pos) * (capillary_gate * amplify) * u_dt;
+        }
+
+        // Eddy-current heating (MAT_EDDY_COPPER). Physically: a conductor
+        // moving through a field has an EMF ∝ v×B, which drives currents
+        // that dissipate as Joule heat. 2D approximation uses scalar
+        // |v|^2 * |H|^2 (ignores the angle between v and H but captures
+        // the magnitude trend). Rate constant tuned so moving a copper
+        // bar through a typical scene magnet visibly reddens it within
+        // a few seconds of sim time without making it explode.
+        if (mat_type == 73u) {
+            float hmag = sample_magnetic_field_smooth(pos).z;
+            float vspeed = length(new_vel);
+            const float k_eddy = 0.32; // K per (m/s)^2 * |H|^2 * s
+            float dQ = k_eddy * vspeed * vspeed * hmag * hmag * u_dt;
+            // Safety clamp: even under extreme moves, limit single-frame
+            // heating so we never produce NaN-inducing spikes.
+            temperatures[p] = mag_temp + clamp(dQ, 0.0, 60.0);
         }
     }
 
@@ -924,7 +960,8 @@ void main() {
                          mat_type == 49u || mat_type == 62u ||
                          mat_type == 63u || mat_type == 64u || mat_type == 65u ||
                          mat_type == 66u || mat_type == 67u || mat_type == 68u ||
-                         mat_type == 69u || mat_type == 70u);
+                         mat_type == 69u || mat_type == 70u || mat_type == 71u ||
+                         mat_type == 72u || mat_type == 73u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||
@@ -1066,6 +1103,9 @@ void main() {
             else if (mat_type == 68u) material_cooling = 0.80; // diamagnetic: slightly cooler-preserving
             else if (mat_type == 69u) material_cooling = 1.25; // para mist: cools fast (low mass, aerosol)
             else if (mat_type == 70u) material_cooling = 0.55; // sticky ferro: dense, retains heat
+            else if (mat_type == 71u) material_cooling = 1.80; // superconductor: cools ultra-fast (cryogenic wanted)
+            else if (mat_type == 72u) material_cooling = 0.85; // Curie ferro: moderate cooling rate
+            else if (mat_type == 73u) material_cooling = 1.40; // eddy copper: good thermal conductor, radiates heat quickly
             else if (mat_type == 32u) material_cooling = 0.62;
             else if (mat_type == 33u) material_cooling = 0.58;
             else if (mat_type == 34u) material_cooling = 0.78;

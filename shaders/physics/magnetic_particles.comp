@@ -26,7 +26,16 @@ const uint MAT_HEAVY_FERRO_FLUID = 67u;
 const uint MAT_DIAMAGNETIC_FLUID = 68u;
 const uint MAT_PARA_MIST = 69u;
 const uint MAT_STICKY_FERRO = 70u;
+const uint MAT_SUPERCONDUCTOR = 71u;   // Meissner effect: perfect diamagnet below T_c
+const uint MAT_CURIE_FERRO = 72u;      // ferromagnet that sharply loses M above T_Curie
+const uint MAT_EDDY_COPPER = 73u;      // non-magnetic conductor; heated by |v|^2*|H|^2 in mpm_g2p
 const float FIXED_SCALE = 256.0;
+
+// Critical temperatures for thermal-magnetic transitions (in Kelvin — match
+// the engine's existing temperature units used in magnetic_particles for
+// thermal softening, ~300K ambient, ~400K curies elsewhere).
+const float SUPERCONDUCTOR_T_C = 180.0;  // "warmer" than real LN2 so typical scenes show the effect
+const float CURIE_FERRO_T_C    = 680.0;  // scaled analog of iron's ~1043K; fits the thermal range in use
 
 float langevin_response(float hmag, float saturation, float alpha) {
     float x = max(alpha * hmag, 1e-4);
@@ -65,7 +74,8 @@ void main() {
     if (mat != MAT_FERRO_FLUID && mat != MAT_HEAVY_FERRO_FLUID &&
         mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER &&
         mat != MAT_DIAMAGNETIC_FLUID && mat != MAT_PARA_MIST &&
-        mat != MAT_STICKY_FERRO) return;
+        mat != MAT_STICKY_FERRO && mat != MAT_SUPERCONDUCTOR &&
+        mat != MAT_CURIE_FERRO) return; // EDDY_COPPER is non-magnetic — handled only in g2p heating path
 
     vec2 pos = positions[p];
     vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
@@ -117,6 +127,27 @@ void main() {
         // clumps instead of tall spikes.
         saturation = 10.0;
         alpha = 2.2;
+    } else if (mat == MAT_SUPERCONDUCTOR) {
+        // Meissner effect: below T_c, the material is a PERFECT diamagnet —
+        // M = -H (χ = -1), field expelled from its interior. Above T_c it's
+        // a normal conductor with no magnetic response. Implemented here
+        // as a temperature-gated very-large-negative-χ branch; the actual
+        // M = -H flow goes through the polarity factor plus a saturation
+        // large enough that Langevin pins near its asymptote for any
+        // reasonable applied H.
+        float active = smoothstep(SUPERCONDUCTOR_T_C + 8.0, SUPERCONDUCTOR_T_C - 8.0, temp);
+        saturation = 30.0 * active;
+        alpha = 5.0 * active;
+        polarity = -1.0;
+    } else if (mat == MAT_CURIE_FERRO) {
+        // Hard ferromagnet with a sharp Curie transition. Below T_Curie,
+        // behaves like heavy ferro (high saturation, high alpha). Above
+        // T_Curie, chi drops to zero — the material is paramagnetic and
+        // essentially doesn't magnetize. Heating it visibly "kills" its
+        // magnetism; cooling it back restores.
+        float below = smoothstep(CURIE_FERRO_T_C + 25.0, CURIE_FERRO_T_C - 25.0, temp);
+        saturation = 16.0 * below;
+        alpha = 3.6 * below;
     } else {
         // MAT_MAGNETIC_RUBBER
         saturation = 6.2;
@@ -138,7 +169,8 @@ void main() {
 
     if (mat == MAT_FERRO_FLUID || mat == MAT_HEAVY_FERRO_FLUID ||
         mat == MAT_DIAMAGNETIC_FLUID || mat == MAT_PARA_MIST ||
-        mat == MAT_STICKY_FERRO) {
+        mat == MAT_STICKY_FERRO || mat == MAT_SUPERCONDUCTOR ||
+        mat == MAT_CURIE_FERRO) {
         atomic_add_occ(base + ivec2(0, 0), (1.0 - f.x) * (1.0 - f.y));
         atomic_add_occ(base + ivec2(1, 0), f.x * (1.0 - f.y));
         atomic_add_occ(base + ivec2(0, 1), (1.0 - f.x) * f.y);

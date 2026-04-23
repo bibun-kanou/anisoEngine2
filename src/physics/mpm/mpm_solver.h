@@ -86,6 +86,9 @@ enum class MPMMaterial : u32 {
     DIAMAGNETIC_FLUID = 68,
     PARA_MIST = 69,
     STICKY_FERRO = 70,
+    SUPERCONDUCTOR = 71,
+    CURIE_FERRO = 72,
+    EDDY_COPPER = 73,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);
