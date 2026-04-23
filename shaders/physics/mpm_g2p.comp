@@ -82,6 +82,14 @@ uniform int   u_use_real_magnetics;
 uniform vec2  u_magnetic_world_min;
 uniform vec2  u_magnetic_world_max;
 uniform float u_magnetic_force_scale;
+// External-drive signals used to gate Kelvin body-force. When neither the
+// ambient field nor the cursor brush is strong enough to provide a clean
+// "external" stimulus, we damp the body-force so particle-to-particle
+// dipole-dipole self-feedback can't run away and collapse a puddle under a
+// microscopic ambient seed. Both paths are OR'd — if EITHER is strong, force
+// passes through.
+uniform float u_magnetic_ambient_mag;     // |ambient_H|
+uniform float u_magnetic_cursor_strength; // |cursor_strength|
 uniform int   u_keep_colors;
 uniform uint  u_highlight_start; // Global index range to highlight
 uniform uint  u_highlight_end;
@@ -474,14 +482,27 @@ vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
     float wall_gate = mix(0.22, 1.0, smoothstep(u_dx * 2.0, u_dx * 7.0, max(d, 0.0)));
     hf_suppress *= wall_gate;
     f *= hf_suppress;
+    // External-drive gate. In the absence of a CLEAR external stimulus
+    // (strong ambient field OR active cursor), we damp the Kelvin force
+    // so the particle-to-particle dipole-dipole attraction can't run
+    // away from a microscopic ambient seed. Either signal being strong
+    // lets the force through at full strength.
+    //   - ambient_gate: ramps in as |ambient_H| crosses 0.3 -> 3.0.
+    //     Below 0.3 the ambient is physically too weak for real
+    //     ferrofluid to macroscopically respond; above 3.0 particles
+    //     are near saturation and demag feedback is self-regulating.
+    //   - cursor_gate: ramps in as cursor_strength crosses 0.002 -> 0.05.
+    //     Much smaller threshold because cursor is a strongly localized
+    //     source — its gradient is always non-uniform (unlike ambient).
+    float ambient_gate = smoothstep(0.3, 3.0, u_magnetic_ambient_mag);
+    float cursor_gate  = smoothstep(0.002, 0.05, u_magnetic_cursor_strength);
+    float ext_drive    = max(ambient_gate, cursor_gate);
+    f *= ext_drive;
     // Safety clamp against solver spikes at coarse cell boundaries.
     // Real ferrofluid experiments see ~1-3g peak body-force acceleration
-    // (they work against gravity but only marginally). 15 m/s² = 1.5g
-    // gives visible pull without overwhelming solid materials that
-    // happen to also be magnetizable (e.g. soft iron, magnetic rubber),
-    // whose elastic restoring force at moderate E cannot absorb more
-    // without runaway deformation. The previous 50 was causing soft
-    // magnetic solids to explode.
+    // (they work against gravity but only marginally). force_limit is a
+    // per-material cap — heavy ferro uses higher caps so it can climb,
+    // regular ferro uses lower ones for subtle behavior.
     float mag = length(f);
     float max_force = max(force_limit, 0.0);
     if (mag > max_force) f *= max_force / mag;
@@ -622,10 +643,10 @@ void main() {
         // Older values (1.8, 5.5) were deliberately below gravity which is why
         // the fluid couldn't climb without disabling G. Bumped all to cleanly
         // overcome gravity in strong-field regions.
-        if (mat_type == 31u) { susceptibility = 0.14; max_mag_force = 9.0; }    // ferro: subtle climb, stable under weak ambient
+        if (mat_type == 31u) { susceptibility = 0.22; max_mag_force = 14.0; }   // ferro: visibly climbs to cursor
         else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron unchanged
-        else if (mat_type == 58u) { susceptibility = 0.34; max_mag_force = 6.0; }   // magnetic rubber: slightly stronger
-        else if (mat_type == 67u) { susceptibility = 0.35; max_mag_force = 14.0; }  // HEAVY ferro: still climbs vs gravity (1.4g cap), no runaway self-collapse
+        else if (mat_type == 58u) { susceptibility = 0.34; max_mag_force = 6.0; }   // magnetic rubber
+        else if (mat_type == 67u) { susceptibility = 0.90; max_mag_force = 28.0; }  // HEAVY ferro: strong climb vs gravity (2.8g cap); ext-drive gate prevents self-collapse
         if (susceptibility > 0.0) {
             vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
             new_vel += mag_force * u_dt;

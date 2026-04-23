@@ -36,17 +36,17 @@ public:
         // unchanged whether or not debug is on, because the solved
         // field is read by the same G2P Kelvin force path.
         bool debug_force_active = false;
-        f32 source_scale = 18.0f;
+        f32 source_scale = 24.0f;
         // force_scale bundles (μ₀/ρ) conversion from solver |H|² units
-        // into particle acceleration. Tuned so that peak Kelvin force
-        // sits around 1-5 m/s² in typical scenes — comparable to
-        // gravity — which gives visible deformation without saturating
-        // the 15 m/s² max_force clamp in mpm_g2p.comp over a wide
-        // region (which would turn the Kelvin force into a uniform
-        // radial pull and collapse the fluid).
-        f32 force_scale = 1.0f;
-        i32 jacobi_iterations = 52;
-        i32 induction_iterations = 2;
+        // into particle acceleration. Previously tuned to ~1 for subtle
+        // behavior; now raised to 1.6 so a single moderate-strength
+        // external source (cursor, scene magnet, or ambient) produces
+        // visibly climbing ferrofluid. The external-drive gate in
+        // mpm_g2p.comp prevents this higher scale from triggering
+        // runaway self-attraction under weak ambient.
+        f32 force_scale = 1.6f;
+        i32 jacobi_iterations = 72;
+        i32 induction_iterations = 3;
         f32 rigid_permanent_scale = 0.18f;
         f32 rigid_soft_scale = 0.10f;
         vec2 cursor_pos = vec2(0.0f);

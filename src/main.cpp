@@ -6844,6 +6844,25 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
             g_magnetic.params().ambient_H = ng::vec2(0.0f, 0.0f);
         }
 
+        // Raw solver-strength knobs. These affect EVERY magnetic source
+        // (cursor, scene magnets, ambient, ferro demag feedback) since
+        // they're global multipliers / iteration counts inside the solver
+        // pipeline. Bumping them up makes the cursor pull harder, spikes
+        // grow taller, and the overlay show richer patterning — at the
+        // cost of more work per frame.
+        if (ImGui::TreeNode("Solver Strength")) {
+            auto& mag_p = g_magnetic.params();
+            ImGui::SliderFloat("Source Scale", &mag_p.source_scale, 1.0f, 80.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on M before rasterization into the drive field. Higher = each magnetized particle contributes more to the solved H, so ferro clusters dominate the field more visibly. Default 24.");
+            ImGui::SliderFloat("Force Scale", &mag_p.force_scale, 0.1f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the Kelvin body-force (in m/s^2). Higher = ferrofluid accelerates toward gradients faster. Per-material max_mag_force clamps still apply. Default 1.6.");
+            ImGui::SliderInt("Jacobi Iters", &mag_p.jacobi_iterations, 8, 200);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Poisson relaxation iterations. Higher = cleaner field, longer-range coupling (ferro senses farther sources), more GPU cost. Default 72.");
+            ImGui::SliderInt("Induction Iters", &mag_p.induction_iterations, 0, 8);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How many scene-magnet+soft-SDF induction passes. Higher = more accurate soft-iron / magnetic-rubber self-consistency. Default 3.");
+            ImGui::TreePop();
+        }
+
         ImGui::Checkbox("Magnetic Debug", &g_show_magnetic_debug);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Full magnetic debug panel with multiple views (vectors, |M|, Kelvin force, shader, etc).");
         if (g_show_magnetic_debug) {

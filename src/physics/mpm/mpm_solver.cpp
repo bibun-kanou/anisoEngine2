@@ -738,9 +738,18 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         g2p_shader_.set_vec2("u_magnetic_world_min", magnetic->world_min());
         g2p_shader_.set_vec2("u_magnetic_world_max", magnetic->world_max());
         g2p_shader_.set_float("u_magnetic_force_scale", magnetic->params().force_scale);
+        // Used by the external-drive gate in magnetic_body_force so the
+        // Kelvin force only activates when there's a clean non-self source.
+        const auto& mp_params = magnetic->params();
+        float amb = std::sqrt(mp_params.ambient_H.x * mp_params.ambient_H.x +
+                              mp_params.ambient_H.y * mp_params.ambient_H.y);
+        g2p_shader_.set_float("u_magnetic_ambient_mag", amb);
+        g2p_shader_.set_float("u_magnetic_cursor_strength", std::abs(mp_params.cursor_strength));
     } else {
         g2p_shader_.set_int("u_use_real_magnetics", 0);
         g2p_shader_.set_float("u_magnetic_force_scale", 0.0f);
+        g2p_shader_.set_float("u_magnetic_ambient_mag", 0.0f);
+        g2p_shader_.set_float("u_magnetic_cursor_strength", 0.0f);
     }
     if (air) {
         glBindTextureUnit(4, air->temp_texture());
