@@ -5084,62 +5084,381 @@ static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
 // ---- Custom weapon editor + diagram ----
 //
 // Reads from and writes to g_custom_recipe. Pattern: one CollapsingHeader per
-// building block (B1-B9 + Special), plus a small top panel with a colored
-// cross-section diagram of the current recipe so the user can see at a glance
-// which layers are enabled and how big each one is.
+// building block (B1-B9 + Special), plus a detailed cross-section diagram at
+// the top that encodes every important block state visually.
+//
+// Diagram encoding:
+//   • Shell outline thickness  ∝ shell_density
+//   • Horizontal stripes on shell  = thermal isolation enabled
+//   • Propel band with flame zigzag lines  = propellant on; length/count ∝ thrust × nozzle
+//   • Fuse band with a clock face  = delay fuse; label shows delay in ms
+//   • Core band with a starburst  = main charge; ray count ∝ burst_scale; hue red→orange as heat rises
+//   • Payload band with shrapnel dots  = payload on; dot count ∝ push, vertical scatter ∝ (1 − directionality)
+//   • Contact sensor lightning on the nose  = impact_rupture + crack_rate tag
+//   • Down arrow under shell  = penetrate_on_impact
+//   • Side arrows top/bottom  = side_blast_scale > 0
+//   • Stats table below  = every numeric parameter in a compact 3-col readout
+
+static const char* custom_shell_name(ng::MPMMaterial m) {
+    switch (m) {
+        case ng::MPMMaterial::STONEWARE: return "Stoneware";
+        case ng::MPMMaterial::CERAMIC:   return "Ceramic";
+        case ng::MPMMaterial::TOUGH:     return "Tough";
+        case ng::MPMMaterial::SEALED_CHARGE: return "Sealed";
+        default: return "?";
+    }
+}
+static const char* custom_payload_name(ng::MPMMaterial m) {
+    switch (m) {
+        case ng::MPMMaterial::THERMO_METAL: return "Thermo";
+        case ng::MPMMaterial::FIRECRACKER:  return "Bomblets";
+        case ng::MPMMaterial::CERAMIC:      return "Ceramic";
+        case ng::MPMMaterial::BRITTLE:      return "Brittle";
+        default: return "?";
+    }
+}
+
 static void draw_custom_weapon_diagram() {
     CustomWeaponRecipe& r = g_custom_recipe;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const float total_w = ImGui::GetContentRegionAvail().x - 8.0f;
-    const float bar_h = 36.0f;
-    const float pad = 2.0f;
+    const float total_w = glm::max(ImGui::GetContentRegionAvail().x - 8.0f, 200.0f);
+    const float bar_h = 64.0f;  // Tall enough for symbols + labels
+    const float pad = 3.0f;
     const ImVec2 a(p0.x, p0.y);
     const ImVec2 b(p0.x + total_w, p0.y + bar_h);
+    const float cy = (a.y + b.y) * 0.5f;
 
-    // Background body
-    dl->AddRectFilled(a, b, IM_COL32(20, 22, 28, 255), 4.0f);
-    dl->AddRect(a, b, IM_COL32(180, 180, 200, 255), 4.0f, 0, 1.5f);
+    // --- Body and shell outline (thickness ∝ density) ---
+    dl->AddRectFilled(a, b, IM_COL32(18, 20, 26, 255), 5.0f);
+    const float shell_thickness = glm::clamp(1.2f + r.shell_density * 0.22f, 1.2f, 4.5f);
+    ImU32 shell_col = IM_COL32(235, 235, 245, 255);
+    // Tint shell color for the sealed / cryo material
+    if (r.shell_material == ng::MPMMaterial::SEALED_CHARGE)
+        shell_col = IM_COL32(200, 230, 255, 255);
+    else if (r.shell_material == ng::MPMMaterial::TOUGH)
+        shell_col = IM_COL32(255, 230, 180, 255);
+    else if (r.shell_material == ng::MPMMaterial::CERAMIC)
+        shell_col = IM_COL32(220, 210, 220, 255);
+    dl->AddRect(a, b, shell_col, 5.0f, 0, shell_thickness);
 
-    // Relative widths for each layer. Sizes are clamped so a big thrust doesn't
-    // push the shell off-screen.
+    // --- Insulator stripes (thermal isolation) ---
+    if (r.thermal_isolation) {
+        for (int i = 0; i < 4; ++i) {
+            float ty = a.y + pad + 3.0f + i * 4.0f;
+            if (ty > b.y - pad - 3.0f) break;
+            dl->AddLine(ImVec2(a.x + pad + 1.0f, ty), ImVec2(b.x - pad - 1.0f, ty),
+                        IM_COL32(140, 190, 230, 70), 1.0f);
+        }
+    }
+
+    // --- Compute band widths (clamped so wildly-tuned sizes still fit) ---
     auto clampw = [](float w) { return glm::clamp(w, 0.0f, 3.5f); };
     const float w_prop    = r.propellant_enabled ? clampw(0.5f + r.thrust_scale * r.nozzle_open * 0.20f) : 0.0f;
-    const float w_fuse    = 0.6f + r.fuse_initial_temp * 0.001f;
+    const float w_fuse    = glm::clamp(0.5f + r.delay_ms * 0.0015f, 0.5f, 2.2f); // fuse width ∝ delay
     const float w_core    = 1.2f + r.burst_scale * 1.1f;
     const float w_payload = r.payload_enabled ? (0.8f + r.payload_push_scale * 0.12f) : 0.0f;
     const float w_sum = w_prop + w_fuse + w_core + w_payload + 1e-4f;
-    const float seg_w = (total_w - 4.0f * pad) / w_sum;
-    float cursor = a.x + pad;
+    const float seg_w = (total_w - 4.0f * pad - shell_thickness * 2.0f) / w_sum;
+    float cursor = a.x + pad + shell_thickness;
 
-    auto band = [&](float w_units, ImU32 col, const char* lbl) {
-        if (w_units <= 0.001f) return;
+    // --- Propellant band ---
+    if (w_prop > 0.01f) {
         float x0 = cursor;
-        float x1 = cursor + w_units * seg_w;
-        dl->AddRectFilled(ImVec2(x0, a.y + pad), ImVec2(x1, b.y - pad), col, 3.0f);
-        // center label
-        const ImVec2 ts = ImGui::CalcTextSize(lbl);
-        if (x1 - x0 > ts.x + 6.0f) {
-            dl->AddText(ImVec2((x0 + x1) * 0.5f - ts.x * 0.5f, a.y + bar_h * 0.5f - ts.y * 0.5f),
-                        IM_COL32(245, 245, 245, 235), lbl);
+        float x1 = cursor + w_prop * seg_w;
+        dl->AddRectFilled(ImVec2(x0, a.y + pad + shell_thickness),
+                          ImVec2(x1, b.y - pad - shell_thickness),
+                          IM_COL32(70, 140, 210, 255), 3.0f);
+        // Flame wavy lines — 3 rows, count of wavelengths ∝ thrust
+        int waves = 2 + (int)(r.thrust_scale * 0.8f);
+        waves = glm::clamp(waves, 2, 8);
+        for (int row = 0; row < 3; ++row) {
+            float y = cy + (row - 1) * 9.0f;
+            dl->PathLineTo(ImVec2(x0 + 2.0f, y));
+            for (int w = 0; w < waves; ++w) {
+                float t0 = (float)w / waves;
+                float t1 = (float)(w + 1) / waves;
+                float xa = x0 + 2.0f + (x1 - x0 - 4.0f) * t0;
+                float xb = x0 + 2.0f + (x1 - x0 - 4.0f) * t1;
+                dl->PathLineTo(ImVec2((xa + xb) * 0.5f, y - 3.0f));
+                dl->PathLineTo(ImVec2(xb, y));
+            }
+            dl->PathStroke(IM_COL32(255, 215, 120, 210), 0, 1.3f);
+        }
+        // Label
+        char lbl[48];
+        snprintf(lbl, sizeof(lbl), "Propel T=%.1f d=%.1fs", r.thrust_scale, r.propellant_duration);
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        if (x1 - x0 > ts.x + 4.0f) {
+            dl->AddText(ImVec2((x0 + x1) * 0.5f - ts.x * 0.5f, a.y + 3.0f),
+                        IM_COL32(255, 255, 255, 240), lbl);
         }
         cursor = x1 + pad;
-    };
-    band(w_prop,    IM_COL32( 90, 160, 220, 255), "Propel");
-    band(w_fuse,    IM_COL32(230, 170,  60, 255), "Fuse");
-    band(w_core,    IM_COL32(220,  80,  40, 255), "Charge");
-    band(w_payload, IM_COL32(190, 190, 200, 255), "Payload");
-
-    // Contact-sensor tag
-    if (r.impact_rupture) {
-        const char* tag = r.penetrate_on_impact ? "Contact + Down" : "Contact";
-        const ImVec2 ts = ImGui::CalcTextSize(tag);
-        dl->AddText(ImVec2(a.x + 4.0f, b.y + 2.0f), IM_COL32(120, 230, 120, 235), tag);
-    } else {
-        dl->AddText(ImVec2(a.x + 4.0f, b.y + 2.0f), IM_COL32(200, 200, 200, 180), "Pressure-rupture only");
     }
 
-    ImGui::Dummy(ImVec2(total_w, bar_h + 18.0f));
+    // --- Fuse band ---
+    {
+        float x0 = cursor;
+        float x1 = cursor + w_fuse * seg_w;
+        dl->AddRectFilled(ImVec2(x0, a.y + pad + shell_thickness),
+                          ImVec2(x1, b.y - pad - shell_thickness),
+                          IM_COL32(235, 175, 70, 255), 3.0f);
+        // Clock face at center
+        float fx = (x0 + x1) * 0.5f;
+        float radius = glm::min(8.0f, (x1 - x0) * 0.28f);
+        dl->AddCircle(ImVec2(fx, cy), radius, IM_COL32(50, 30, 10, 255), 12, 1.3f);
+        dl->AddLine(ImVec2(fx, cy), ImVec2(fx, cy - radius * 0.65f),
+                    IM_COL32(50, 30, 10, 255), 1.2f);
+        dl->AddLine(ImVec2(fx, cy), ImVec2(fx + radius * 0.45f, cy),
+                    IM_COL32(50, 30, 10, 255), 1.2f);
+        // Label (delay ms)
+        char lbl[32];
+        if (r.delay_ms >= 1000.0f) snprintf(lbl, sizeof(lbl), "%.1fs", r.delay_ms * 0.001f);
+        else snprintf(lbl, sizeof(lbl), "%.0fms", r.delay_ms);
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        if (x1 - x0 > ts.x + 4.0f) {
+            dl->AddText(ImVec2((x0 + x1) * 0.5f - ts.x * 0.5f, b.y - ts.y - 3.0f),
+                        IM_COL32(30, 20, 5, 240), lbl);
+        }
+        cursor = x1 + pad;
+    }
+
+    // --- Core (main charge) band ---
+    {
+        float x0 = cursor;
+        float x1 = cursor + w_core * seg_w;
+        float ccx = (x0 + x1) * 0.5f;
+        // Color: hotter charges shift toward red, cooler toward yellow
+        float heat_t = glm::clamp(r.plume_heat_scale * 0.45f, 0.0f, 1.0f);
+        int rr = (int)(200.0f + 40.0f * heat_t);
+        int gg = (int)(120.0f - 60.0f * heat_t);
+        int bb = (int)(50.0f - 20.0f * heat_t);
+        ImU32 core_col = IM_COL32(rr, glm::max(gg, 30), glm::max(bb, 20), 255);
+        dl->AddRectFilled(ImVec2(x0, a.y + pad + shell_thickness),
+                          ImVec2(x1, b.y - pad - shell_thickness),
+                          core_col, 3.0f);
+        // Starburst rays — count and length ∝ burst_scale
+        int rays = glm::clamp(6 + (int)(r.burst_scale * 4.0f), 6, 18);
+        float burst_r = glm::min((x1 - x0) * 0.45f, (b.y - a.y) * 0.35f) *
+                        (0.55f + glm::min(r.burst_scale, 3.0f) * 0.25f);
+        for (int i = 0; i < rays; ++i) {
+            float ang = 6.2831853f * i / rays;
+            ImVec2 tip(ccx + std::cos(ang) * burst_r, cy + std::sin(ang) * burst_r);
+            dl->AddLine(ImVec2(ccx, cy), tip, IM_COL32(255, 245, 160, 235), 1.3f);
+        }
+        dl->AddCircleFilled(ImVec2(ccx, cy), glm::clamp(burst_r * 0.20f, 2.0f, 5.0f),
+                            IM_COL32(255, 255, 220, 240), 10);
+        // Label
+        char lbl[48];
+        snprintf(lbl, sizeof(lbl), "Burst %.1f  H%.1f  P%.1f",
+                 r.burst_scale, r.plume_heat_scale, r.plume_push_scale);
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        if (x1 - x0 > ts.x + 6.0f) {
+            dl->AddText(ImVec2((x0 + x1) * 0.5f - ts.x * 0.5f, a.y + 3.0f),
+                        IM_COL32(255, 255, 255, 245), lbl);
+        }
+        cursor = x1 + pad;
+    }
+
+    // --- Payload band ---
+    if (w_payload > 0.01f) {
+        float x0 = cursor;
+        float x1 = cursor + w_payload * seg_w;
+        ImU32 body_col = IM_COL32(190, 190, 200, 255);
+        if (r.payload_material == ng::MPMMaterial::FIRECRACKER)
+            body_col = IM_COL32(210, 150, 60, 255);
+        else if (r.payload_material == ng::MPMMaterial::CERAMIC)
+            body_col = IM_COL32(200, 190, 195, 255);
+        else if (r.payload_material == ng::MPMMaterial::BRITTLE)
+            body_col = IM_COL32(160, 160, 170, 255);
+        dl->AddRectFilled(ImVec2(x0, a.y + pad + shell_thickness),
+                          ImVec2(x1, b.y - pad - shell_thickness),
+                          body_col, 3.0f);
+        // Shrapnel dots — count ∝ push_scale, vertical scatter ∝ (1 − directionality)
+        int dots = glm::clamp(4 + (int)(r.payload_push_scale * 1.0f), 4, 14);
+        float radial = 1.0f - r.payload_directionality;
+        float scatter_amp = (b.y - a.y - pad * 2.0f) * 0.30f * radial;
+        ImU32 dot_col = (r.payload_material == ng::MPMMaterial::FIRECRACKER)
+                        ? IM_COL32(30, 20, 10, 255) : IM_COL32(30, 30, 40, 255);
+        for (int i = 0; i < dots; ++i) {
+            float t = (float)(i + 1) / (float)(dots + 1);
+            float dx = x0 + t * (x1 - x0);
+            float offs = (((i * 37) % 100) / 100.0f - 0.5f) * 2.0f;
+            float dy = cy + offs * scatter_amp;
+            dl->AddCircleFilled(ImVec2(dx, dy), 2.3f, dot_col);
+        }
+        // Label: material + push
+        char lbl[48];
+        snprintf(lbl, sizeof(lbl), "%s x%.1f",
+                 custom_payload_name(r.payload_material), r.payload_push_scale);
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        if (x1 - x0 > ts.x + 4.0f) {
+            dl->AddText(ImVec2((x0 + x1) * 0.5f - ts.x * 0.5f, a.y + 3.0f),
+                        IM_COL32(30, 30, 40, 245), lbl);
+        }
+        cursor = x1 + pad;
+    }
+
+    // --- Contact-sensor lightning on the nose (left side of bomb) ---
+    if (r.impact_rupture) {
+        float nx = a.x + shell_thickness + 4.0f;
+        float ny = a.y + pad + 2.0f;
+        ImU32 c = IM_COL32(130, 240, 130, 240);
+        // zigzag ⚡
+        dl->PathLineTo(ImVec2(nx,     ny));
+        dl->PathLineTo(ImVec2(nx + 4, ny + 4));
+        dl->PathLineTo(ImVec2(nx + 1, ny + 5));
+        dl->PathLineTo(ImVec2(nx + 5, ny + 10));
+        dl->PathStroke(c, 0, 1.6f);
+    }
+
+    // --- Penetrate-on-impact: down arrow centered beneath the shell ---
+    if (r.penetrate_on_impact) {
+        float cx0 = (a.x + b.x) * 0.5f;
+        float yy = b.y + 2.0f;
+        ImU32 c = IM_COL32(180, 150, 230, 240);
+        dl->AddLine(ImVec2(cx0, yy), ImVec2(cx0, yy + 8), c, 1.8f);
+        dl->PathLineTo(ImVec2(cx0 - 4, yy + 5));
+        dl->PathLineTo(ImVec2(cx0,     yy + 10));
+        dl->PathLineTo(ImVec2(cx0 + 4, yy + 5));
+        dl->PathStroke(c, 0, 1.6f);
+    }
+
+    // --- Side blast arrows top/bottom ---
+    if (r.side_blast_scale > 0.05f) {
+        float mx = (a.x + b.x) * 0.5f;
+        ImU32 c = IM_COL32(230, 180, 110, 230);
+        float amp = 3.0f + glm::min(r.side_blast_scale * 1.5f, 6.0f);
+        // Top arrow
+        dl->AddLine(ImVec2(mx, a.y - 1), ImVec2(mx, a.y - amp - 4), c, 1.6f);
+        dl->PathLineTo(ImVec2(mx - 3, a.y - amp));
+        dl->PathLineTo(ImVec2(mx,     a.y - amp - 4));
+        dl->PathLineTo(ImVec2(mx + 3, a.y - amp));
+        dl->PathStroke(c, 0, 1.5f);
+        // Bottom arrow
+        dl->AddLine(ImVec2(mx, b.y + 1), ImVec2(mx, b.y + amp + 4), c, 1.6f);
+        dl->PathLineTo(ImVec2(mx - 3, b.y + amp));
+        dl->PathLineTo(ImVec2(mx,     b.y + amp + 4));
+        dl->PathLineTo(ImVec2(mx + 3, b.y + amp));
+        dl->PathStroke(c, 0, 1.5f);
+    }
+
+    // --- Overlay text row below the bomb ---
+    float text_y = b.y + 14.0f;
+    float text_x = a.x + 4.0f;
+    char buf[64];
+    if (r.impact_rupture) {
+        snprintf(buf, sizeof(buf), "Contact (%.1f crack/s)", r.crack_rate_threshold);
+        dl->AddText(ImVec2(text_x, text_y), IM_COL32(130, 230, 130, 240), buf);
+        text_x += ImGui::CalcTextSize(buf).x + 12.0f;
+    } else {
+        dl->AddText(ImVec2(text_x, text_y), IM_COL32(200, 200, 200, 180), "Pressure-only");
+        text_x += ImGui::CalcTextSize("Pressure-only").x + 12.0f;
+    }
+    if (r.penetrate_on_impact) {
+        dl->AddText(ImVec2(text_x, text_y), IM_COL32(180, 150, 230, 240), "Penetrate");
+        text_x += ImGui::CalcTextSize("Penetrate").x + 12.0f;
+    }
+    snprintf(buf, sizeof(buf), "Rupture %.1f", r.rupture_scale);
+    dl->AddText(ImVec2(text_x, text_y),
+                r.rupture_scale > 6.0f ? IM_COL32(160, 200, 240, 230)
+                                       : IM_COL32(230, 180, 120, 230), buf);
+
+    ImGui::Dummy(ImVec2(total_w, bar_h + 30.0f));
+
+    // --- Stats readout table ---
+    if (ImGui::BeginTable("##weapon_stats", 4,
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_SizingStretchProp |
+                          ImGuiTableFlags_NoHostExtendX |
+                          ImGuiTableFlags_BordersInnerH)) {
+        ImGui::TableSetupColumn("Block", ImGuiTableColumnFlags_WidthFixed, 85.0f);
+        ImGui::TableSetupColumn("A",     ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("B",     ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("C",     ImGuiTableColumnFlags_WidthStretch, 1.0f);
+
+        auto row = [&](const char* block, const char* c1, const char* c2, const char* c3,
+                       ImU32 block_col) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(block_col));
+            ImGui::TextUnformatted(block);
+            ImGui::PopStyleColor();
+            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(c1);
+            ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(c2 ? c2 : "");
+            ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(c3 ? c3 : "");
+        };
+
+        char a1[48], a2[48], a3[48];
+
+        snprintf(a1, sizeof(a1), "%s", custom_shell_name(r.shell_material));
+        snprintf(a2, sizeof(a2), "E %.0fk", r.shell_stiffness * 0.001f);
+        snprintf(a3, sizeof(a3), "rho %.1fx", r.shell_density);
+        row("B1 Shell", a1, a2, a3, IM_COL32(230, 230, 245, 255));
+
+        if (r.thermal_isolation) {
+            snprintf(a1, sizeof(a1), "on");
+            snprintf(a2, sizeof(a2), "fuse %.0fK", r.fuse_rest_temp);
+            snprintf(a3, sizeof(a3), "core %.0fK", r.core_rest_temp);
+            row("B2 Isolation", a1, a2, a3, IM_COL32(150, 200, 230, 255));
+        } else {
+            row("B2 Isolation", "off", "", "", IM_COL32(120, 120, 140, 255));
+        }
+
+        if (r.impact_rupture) {
+            snprintf(a1, sizeof(a1), "%.1f crack/s", r.crack_rate_threshold);
+            snprintf(a2, sizeof(a2), "vel drop -55%%");
+            row("B3/B4 Sensor", a1, a2, "", IM_COL32(130, 230, 130, 255));
+        } else {
+            row("B3/B4 Sensor", "disarmed", "", "", IM_COL32(120, 120, 140, 255));
+        }
+
+        snprintf(a1, sizeof(a1), "%.0f ms", r.delay_ms);
+        row("B5 Fuse", a1, "", "", IM_COL32(235, 175, 70, 255));
+
+        if (r.propellant_enabled) {
+            snprintf(a1, sizeof(a1), "T %.1f x %.2f", r.thrust_scale, r.nozzle_open);
+            snprintf(a2, sizeof(a2), "burn %.1fs", r.propellant_duration);
+            snprintf(a3, sizeof(a3), "%.0fK", r.fuse_initial_temp);
+            row("B6 Propel", a1, a2, a3, IM_COL32(90, 170, 230, 255));
+        } else {
+            row("B6 Propel", "off", "", "", IM_COL32(120, 120, 140, 255));
+        }
+
+        snprintf(a1, sizeof(a1), "scale %.1f", r.rupture_scale);
+        const char* tag = r.rupture_scale > 6.0f ? "sealed" :
+                          r.rupture_scale > 3.0f ? "firm" : "pressure-rupture";
+        row("B7 Contain", a1, tag, "", IM_COL32(200, 230, 255, 255));
+
+        snprintf(a1, sizeof(a1), "burst %.2f", r.burst_scale);
+        snprintf(a2, sizeof(a2), "plume %.2f/%.2f", r.plume_push_scale, r.plume_heat_scale);
+        snprintf(a3, sizeof(a3), "blast %.2f/%.2f", r.blast_push_scale, r.blast_heat_scale);
+        row("B8 Blast", a1, a2, a3, IM_COL32(255, 200, 130, 255));
+
+        if (r.payload_enabled) {
+            snprintf(a1, sizeof(a1), "%s", custom_payload_name(r.payload_material));
+            snprintf(a2, sizeof(a2), "push %.1f c%.2f", r.payload_push_scale, r.payload_cone);
+            snprintf(a3, sizeof(a3), "dir %.2f", r.payload_directionality);
+            row("B9 Payload", a1, a2, a3, IM_COL32(190, 190, 200, 255));
+        } else {
+            row("B9 Payload", "none", "", "", IM_COL32(120, 120, 140, 255));
+        }
+
+        // Only show Special row if any special field is active.
+        bool any_special = r.penetrate_on_impact ||
+                           r.side_blast_scale > 0.01f ||
+                           std::fabs(r.axis_bias - 1.0f) > 0.01f;
+        if (any_special) {
+            char buf1[48] = ""; char buf2[48] = ""; char buf3[48] = "";
+            if (r.penetrate_on_impact) snprintf(buf1, sizeof(buf1), "Penetrate");
+            if (r.side_blast_scale > 0.01f) snprintf(buf2, sizeof(buf2), "side %.1f", r.side_blast_scale);
+            if (std::fabs(r.axis_bias - 1.0f) > 0.01f) snprintf(buf3, sizeof(buf3), "bias %.2f", r.axis_bias);
+            row("Special", buf1, buf2, buf3, IM_COL32(220, 170, 230, 255));
+        }
+
+        ImGui::EndTable();
+    }
+    ImGui::Spacing();
 }
 
 static const char* shell_material_names[] = {
