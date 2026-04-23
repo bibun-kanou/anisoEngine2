@@ -90,6 +90,7 @@ enum class MPMMaterial : u32 {
     CURIE_FERRO = 72,
     EDDY_COPPER = 73,
     HARD_MAGNET = 74,
+    SAND_GRANULAR = 75,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);

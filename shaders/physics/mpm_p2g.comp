@@ -124,6 +124,7 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_CURIE_FERRO 72u
 #define MAT_EDDY_COPPER 73u
 #define MAT_HARD_MAGNET 74u
+#define MAT_SAND_GRANULAR 75u
 
 #include "common/mpm_utils.glsl"
 
@@ -346,6 +347,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_CURIE_FERRO) return vec4(0.02, 0.72, 0.84, 0.06);
     if (mat_type == MAT_EDDY_COPPER) return vec4(0.02, 0.95, 0.82, 0.04);
     if (mat_type == MAT_HARD_MAGNET) return vec4(0.02, 0.80, 0.80, 0.04);
+    if (mat_type == MAT_SAND_GRANULAR) return vec4(0.02, 0.92, 0.78, 0.03);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -436,7 +438,8 @@ void main() {
                          mat_type == MAT_MORPH_TISSUE || mat_type == MAT_ROOT_WEAVE ||
                          mat_type == MAT_CELL_SHEET || mat_type == MAT_ASH_REGROWTH ||
                          mat_type == MAT_SUPERCONDUCTOR || mat_type == MAT_CURIE_FERRO ||
-                         mat_type == MAT_EDDY_COPPER || mat_type == MAT_HARD_MAGNET);
+                         mat_type == MAT_EDDY_COPPER || mat_type == MAT_HARD_MAGNET ||
+                         mat_type == MAT_SAND_GRANULAR);
     float sig_min = is_solid_mat ? 0.5 : 0.1;  // Solids: max 50% compression
     float sig_max = is_solid_mat ? 3.0 : 8.0;
     svd.sigma = clamp(svd.sigma, vec2(sig_min), vec2(sig_max));
@@ -3683,6 +3686,57 @@ void main() {
             float dust = smoothstep(0.22, 1.0, crumble);
             stress *= mix(1.0, 0.18, dust);
         }
+    }
+    else if (mat_type == MAT_SAND_GRANULAR) {
+        // Drucker-Prager sand (Klar et al. 2016 "Drucker-Prager elastoplasticity
+        // for sand animation"). Return-mapping on singular values of F in
+        // log-strain space:
+        //   eps    = log(sigma)
+        //   p_bar  = trace(eps) / d           // hydrostatic log-strain
+        //   s      = eps - p_bar * I          // deviatoric
+        //   tension (p_bar > 0):  collapse to zero deviatoric + zero strain
+        //     (sand can't hold tensile stress — it separates)
+        //   compression (p_bar < 0):
+        //     yield = |s| + alpha_dp * (d*lambda + 2*mu)/(2*mu) * d * p_bar
+        //     if yield > 0:  // plastic flow on the friction cone
+        //       eps_new = eps - yield * s / |s|
+        //       sigma_new = exp(eps_new)
+        //     else:  // inside yield surface — fully elastic
+        //       sigma unchanged
+        // friction_angle = 35° is a reasonable default (glass-bead-like).
+        // alpha_dp = sqrt(2/d) * 2*sin(phi)/(3 - sin(phi)) in 3D; for 2D we
+        // use the commonly-adopted Klar form sqrt(2)*2*sin(phi)/(3-sin(phi)).
+        const float friction_angle = 0.6109; // 35 deg
+        const float sin_phi = sin(friction_angle);
+        const float alpha_dp = sqrt(2.0) * 2.0 * sin_phi / (3.0 - sin_phi);
+        float d = 2.0;
+
+        vec2 eps = vec2(log(max(svd.sigma.x, 1e-4)),
+                        log(max(svd.sigma.y, 1e-4)));
+        float p_bar = (eps.x + eps.y) / d;
+        vec2 s_vec = eps - vec2(p_bar);
+        float s_norm = length(s_vec);
+        vec2 eps_new = eps;
+        if (p_bar > 0.0) {
+            // Tension: sand can't hold a stretch — collapse to zero strain.
+            eps_new = vec2(0.0);
+        } else if (s_norm > 1e-6) {
+            float yield = s_norm + alpha_dp * (d * lambda + 2.0 * mu) / (2.0 * mu)
+                        * d * p_bar;
+            if (yield > 0.0) {
+                // Project onto the Drucker-Prager cone by shrinking the
+                // deviatoric part; preserve the hydrostatic component.
+                eps_new = eps - yield * s_vec / s_norm;
+            }
+            // else: inside yield — eps stays elastic, no change.
+        }
+        vec2 sigma_new = vec2(exp(eps_new.x), exp(eps_new.y));
+        F = svd.U * mat2(sigma_new.x, 0.0, 0.0, sigma_new.y) * transpose(svd.V);
+        float J_new = sigma_new.x * sigma_new.y;
+        mat2 R_new = svd.U * transpose(svd.V);
+        // Neo-Hookean on the projected F — only the elastic part drives stress.
+        stress = 2.0 * mu * (F - R_new) * transpose(F)
+               + lambda * (J_new - 1.0) * J_new * mat2(1.0);
     }
     else {
         // ELASTIC + THERMAL fallback
