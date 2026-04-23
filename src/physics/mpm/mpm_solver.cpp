@@ -36,6 +36,12 @@ vec4 default_thermal_coupling(MPMMaterial material) {
             return vec4(0.00f, 0.75f, 0.72f, 0.06f);
         case MPMMaterial::HEAVY_FERRO_FLUID:
             return vec4(0.00f, 0.82f, 0.68f, 0.04f);
+        case MPMMaterial::DIAMAGNETIC_FLUID:
+            return vec4(0.04f, 0.55f, 0.78f, 0.08f);
+        case MPMMaterial::PARA_MIST:
+            return vec4(0.02f, 0.35f, 0.90f, 0.03f);
+        case MPMMaterial::STICKY_FERRO:
+            return vec4(0.00f, 0.68f, 0.58f, 0.05f);
         case MPMMaterial::MAILLARD:
             return vec4(0.30f, 0.65f, 0.60f, 0.08f);
         case MPMMaterial::MUSHROOM:
@@ -146,6 +152,9 @@ static vec4 material_spawn_color(MPMMaterial material) {
         case MPMMaterial::MEMORY_WAX:return vec4(0.92f, 0.76f, 0.42f, 1.0f);
         case MPMMaterial::FERRO_FLUID:return vec4(0.95f, 0.55f, 0.15f, 1.0f);
         case MPMMaterial::HEAVY_FERRO_FLUID:return vec4(0.32f, 0.28f, 0.38f, 1.0f);
+        case MPMMaterial::DIAMAGNETIC_FLUID:return vec4(0.58f, 0.82f, 0.95f, 1.0f);
+        case MPMMaterial::PARA_MIST:return vec4(0.82f, 0.86f, 0.96f, 1.0f);
+        case MPMMaterial::STICKY_FERRO:return vec4(0.18f, 0.16f, 0.22f, 1.0f);
         case MPMMaterial::MAILLARD:return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM:return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::CRUMB_LOAF:return vec4(0.95f, 0.80f, 0.54f, 1.0f);
@@ -745,11 +754,15 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
                               mp_params.ambient_H.y * mp_params.ambient_H.y);
         g2p_shader_.set_float("u_magnetic_ambient_mag", amb);
         g2p_shader_.set_float("u_magnetic_cursor_strength", std::abs(mp_params.cursor_strength));
+        // Scene-active gate: Real Magnetics on => scene SDF sources may
+        // contribute non-self gradients, so pass force through.
+        g2p_shader_.set_int("u_magnetic_scene_active", mp_params.enabled ? 1 : 0);
     } else {
         g2p_shader_.set_int("u_use_real_magnetics", 0);
         g2p_shader_.set_float("u_magnetic_force_scale", 0.0f);
         g2p_shader_.set_float("u_magnetic_ambient_mag", 0.0f);
         g2p_shader_.set_float("u_magnetic_cursor_strength", 0.0f);
+        g2p_shader_.set_int("u_magnetic_scene_active", 0);
     }
     if (air) {
         glBindTextureUnit(4, air->temp_texture());

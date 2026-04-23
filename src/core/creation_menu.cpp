@@ -251,6 +251,9 @@ vec4 default_material_color(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::MEMORY_WAX: return vec4(0.92f, 0.76f, 0.42f, 1.0f);
         case MPMMaterial::FERRO_FLUID: return vec4(0.95f, 0.55f, 0.15f, 1.0f);
         case MPMMaterial::HEAVY_FERRO_FLUID: return vec4(0.32f, 0.28f, 0.38f, 1.0f);
+        case MPMMaterial::DIAMAGNETIC_FLUID: return vec4(0.58f, 0.82f, 0.95f, 1.0f);
+        case MPMMaterial::PARA_MIST: return vec4(0.82f, 0.86f, 0.96f, 1.0f);
+        case MPMMaterial::STICKY_FERRO: return vec4(0.18f, 0.16f, 0.22f, 1.0f);
         case MPMMaterial::MAILLARD: return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM: return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::ORTHO_BEND: return vec4(0.78f, 0.56f, 0.26f, 1.0f);
@@ -329,6 +332,9 @@ std::string technique_summary(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::MEMORY_WAX: return "Thermoplastic memory solid: softens hot, flows, then cool-recovers toward its rest shape.";
         case MPMMaterial::FERRO_FLUID: return "Magnet-responsive MPM liquid with chain-like flow memory and field pulling at the cursor.";
         case MPMMaterial::HEAVY_FERRO_FLUID: return "Much stronger ferrofluid: visibly clumps onto itself, forms taller spikes, and pulls harder under any magnetic field.";
+        case MPMMaterial::DIAMAGNETIC_FLUID: return "Diamagnetic (anti-ferro) liquid: negative susceptibility. Pushed AWAY from high-field regions — pools at the edge of magnet zones, hangs back from the cursor, and forms a hollow around any local |H| peak.";
+        case MPMMaterial::PARA_MIST: return "Weakly paramagnetic aerosol / mist: low density, gentle drift along field lines. Doesn't clump, forms wispy flowing trails that follow the field direction.";
+        case MPMMaterial::STICKY_FERRO: return "High-cohesion ferrofluid: strong magnetization, very damped, stays in dense globules instead of tall spikes. Dark matte look. Good for 'magnetic blobs' feel.";
         case MPMMaterial::MAG_SOFT_IRON: return "Real magnetics benchmark: soft iron body that samples the solved magnetic field and pulls toward stronger |H|^2 regions.";
         case MPMMaterial::MAGNETIC_RUBBER: return "Real magnetics benchmark: compliant magnetizable solid that bends and drifts under the solved magnetic field.";
         case MPMMaterial::MAILLARD: return "Cooking surface model: browning, drying, shell-setting, and steam blistering without a full bread-like rise.";

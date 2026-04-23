@@ -90,6 +90,11 @@ uniform float u_magnetic_force_scale;
 // passes through.
 uniform float u_magnetic_ambient_mag;     // |ambient_H|
 uniform float u_magnetic_cursor_strength; // |cursor_strength|
+// Set true when Real Magnetics is on — scene SDF magnets + soft iron etc
+// contribute to the solved field. Their gradients are inherently non-self,
+// so the gate should pass full force through whenever they might exist,
+// or ferro next to a scene magnet (without M held) would feel no force.
+uniform int   u_magnetic_scene_active;
 uniform int   u_keep_colors;
 uniform uint  u_highlight_start; // Global index range to highlight
 uniform uint  u_highlight_end;
@@ -423,6 +428,9 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 30u) return vec4(0.10, 0.85, 0.72, 0.04);
     if (mat_type == 31u) return vec4(0.00, 0.75, 0.72, 0.06);
     if (mat_type == 67u) return vec4(0.00, 0.82, 0.68, 0.04);
+    if (mat_type == 68u) return vec4(0.04, 0.55, 0.78, 0.08); // diamagnetic: cool conductive response
+    if (mat_type == 69u) return vec4(0.02, 0.35, 0.90, 0.03); // para mist: airy, low thermal coupling
+    if (mat_type == 70u) return vec4(0.00, 0.68, 0.58, 0.05); // sticky ferro: dense and slow thermally
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -483,20 +491,24 @@ vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
     hf_suppress *= wall_gate;
     f *= hf_suppress;
     // External-drive gate. In the absence of a CLEAR external stimulus
-    // (strong ambient field OR active cursor), we damp the Kelvin force
-    // so the particle-to-particle dipole-dipole attraction can't run
-    // away from a microscopic ambient seed. Either signal being strong
-    // lets the force through at full strength.
+    // (strong ambient, active cursor, or scene magnets via Real Magnetics),
+    // we damp the Kelvin force so the particle-to-particle dipole-dipole
+    // attraction can't run away from a microscopic ambient seed. ANY of
+    // the three signals being strong lets the force through at full
+    // strength.
     //   - ambient_gate: ramps in as |ambient_H| crosses 0.3 -> 3.0.
     //     Below 0.3 the ambient is physically too weak for real
     //     ferrofluid to macroscopically respond; above 3.0 particles
     //     are near saturation and demag feedback is self-regulating.
     //   - cursor_gate: ramps in as cursor_strength crosses 0.002 -> 0.05.
-    //     Much smaller threshold because cursor is a strongly localized
-    //     source — its gradient is always non-uniform (unlike ambient).
+    //     Small threshold because cursor is a strongly localized source.
+    //   - scene_gate: binary on/off tied to Real Magnetics. When scene
+    //     magnets are enabled, whatever gradients exist are inherently
+    //     non-self-referential; pass the force through.
     float ambient_gate = smoothstep(0.3, 3.0, u_magnetic_ambient_mag);
     float cursor_gate  = smoothstep(0.002, 0.05, u_magnetic_cursor_strength);
-    float ext_drive    = max(ambient_gate, cursor_gate);
+    float scene_gate   = (u_magnetic_scene_active != 0) ? 1.0 : 0.0;
+    float ext_drive    = max(max(ambient_gate, cursor_gate), scene_gate);
     f *= ext_drive;
     // Safety clamp against solver spikes at coarse cell boundaries.
     // Real ferrofluid experiments see ~1-3g peak body-force acceleration
@@ -600,6 +612,9 @@ void main() {
     float max_speed_cells = 3.0;
     if (mat_type == 31u) max_speed_cells = 0.45;      // ferro should never become ballistic shrapnel
     else if (mat_type == 67u) max_speed_cells = 0.55; // heavy ferro: bit faster allowed for taller spikes, still not ballistic
+    else if (mat_type == 68u) max_speed_cells = 0.50; // diamagnetic: moderate cap, can drift away
+    else if (mat_type == 69u) max_speed_cells = 1.40; // para mist: light aerosol, moves briskly
+    else if (mat_type == 70u) max_speed_cells = 0.38; // sticky ferro: stays cohesive, slow
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -644,18 +659,28 @@ void main() {
         // the fluid couldn't climb without disabling G. Bumped all to cleanly
         // overcome gravity in strong-field regions.
         if (mat_type == 31u) { susceptibility = 0.22; max_mag_force = 14.0; }   // ferro: visibly climbs to cursor
-        else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron unchanged
+        else if (mat_type == 57u) { susceptibility = 0.22; max_mag_force = 9.0; }   // soft iron (MPM): was 0.0018 — effectively dead; now responds visibly to scene magnets
         else if (mat_type == 58u) { susceptibility = 0.34; max_mag_force = 6.0; }   // magnetic rubber
         else if (mat_type == 67u) { susceptibility = 0.90; max_mag_force = 28.0; }  // HEAVY ferro: strong climb vs gravity (2.8g cap); ext-drive gate prevents self-collapse
-        if (susceptibility > 0.0) {
+        else if (mat_type == 68u) { susceptibility = -0.55; max_mag_force = 12.0; } // DIAMAGNETIC: negative chi — particles pushed AWAY from field gradients (pool at edge of magnets)
+        else if (mat_type == 69u) { susceptibility = 0.08; max_mag_force = 4.0; }   // PARA_MIST: very light, gentle drift along field lines, barely accelerates
+        else if (mat_type == 70u) { susceptibility = 0.55; max_mag_force = 18.0; }  // STICKY_FERRO: strong attraction but stays cohesive — clumps into globules
+        // abs() so diamagnetic (negative chi) also gets the force path.
+        // magnetic_body_force produces a signed force via `f = 0.5 * chi * ...`,
+        // so negative chi correctly produces repulsion away from field gradients.
+        if (abs(susceptibility) > 1e-5) {
             vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
             new_vel += mag_force * u_dt;
             if (mat_type == 58u) {
                 new_vel *= (1.0 - 0.10 * u_dt);
             }
+            // Sticky ferro: strong velocity damping so clumps don't splash apart.
+            if (mat_type == 70u) {
+                new_vel *= (1.0 - 0.35 * u_dt);
+            }
         }
 
-        if (mat_type == 31u || mat_type == 67u) {
+        if (mat_type == 31u || mat_type == 67u || mat_type == 70u) {
             float hmag = sample_magnetic_field_smooth(pos).z;
             // Heavy ferro's surface force is scaled up aggressively so spikes
             // stretch tall and clumps compact even without a strong external
@@ -898,7 +923,8 @@ void main() {
                          mat_type == 47u || mat_type == 48u ||
                          mat_type == 49u || mat_type == 62u ||
                          mat_type == 63u || mat_type == 64u || mat_type == 65u ||
-                         mat_type == 66u || mat_type == 67u);
+                         mat_type == 66u || mat_type == 67u || mat_type == 68u ||
+                         mat_type == 69u || mat_type == 70u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||
@@ -1037,6 +1063,9 @@ void main() {
             else if (mat_type == 30u) material_cooling = 0.68;
             else if (mat_type == 31u) material_cooling = 0.72;
             else if (mat_type == 67u) material_cooling = 0.68;
+            else if (mat_type == 68u) material_cooling = 0.80; // diamagnetic: slightly cooler-preserving
+            else if (mat_type == 69u) material_cooling = 1.25; // para mist: cools fast (low mass, aerosol)
+            else if (mat_type == 70u) material_cooling = 0.55; // sticky ferro: dense, retains heat
             else if (mat_type == 32u) material_cooling = 0.62;
             else if (mat_type == 33u) material_cooling = 0.58;
             else if (mat_type == 34u) material_cooling = 0.78;

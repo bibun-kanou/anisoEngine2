@@ -83,6 +83,9 @@ enum class MPMMaterial : u32 {
     CELL_SHEET = 65,
     ASH_REGROWTH = 66,
     HEAVY_FERRO_FLUID = 67,
+    DIAMAGNETIC_FLUID = 68,
+    PARA_MIST = 69,
+    STICKY_FERRO = 70,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);

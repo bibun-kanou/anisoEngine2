@@ -117,6 +117,9 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_CELL_SHEET 65u
 #define MAT_ASH_REGROWTH 66u
 #define MAT_HEAVY_FERRO_FLUID 67u
+#define MAT_DIAMAGNETIC_FLUID 68u
+#define MAT_PARA_MIST 69u
+#define MAT_STICKY_FERRO 70u
 
 #include "common/mpm_utils.glsl"
 
@@ -332,6 +335,9 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_MEMORY_WAX) return vec4(0.10, 0.85, 0.72, 0.04);
     if (mat_type == MAT_FERRO_FLUID) return vec4(0.00, 0.75, 0.72, 0.06);
     if (mat_type == MAT_HEAVY_FERRO_FLUID) return vec4(0.00, 0.82, 0.68, 0.04);
+    if (mat_type == MAT_DIAMAGNETIC_FLUID) return vec4(0.04, 0.55, 0.78, 0.08);
+    if (mat_type == MAT_PARA_MIST) return vec4(0.02, 0.35, 0.90, 0.03);
+    if (mat_type == MAT_STICKY_FERRO) return vec4(0.00, 0.68, 0.58, 0.05);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -493,7 +499,9 @@ void main() {
         stress = mat2(bulk * J * (J - J_rest));
         C *= (1.0 - vapor * 0.16);
     }
-    else if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_HEAVY_FERRO_FLUID) {
+    else if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_HEAVY_FERRO_FLUID ||
+             mat_type == MAT_DIAMAGNETIC_FLUID || mat_type == MAT_PARA_MIST ||
+             mat_type == MAT_STICKY_FERRO) {
         // Heavy variant reuses the Tait EOS + spike dynamics — it's the same
         // fluid, just with much stronger magnetic response (tuned in the
         // magnetic force block in mpm_g2p and Langevin saturation in
@@ -3671,6 +3679,8 @@ void main() {
     float sn = length(vec4(stress[0], stress[1]));
     float ms;
     if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_HEAVY_FERRO_FLUID ||
+        mat_type == MAT_DIAMAGNETIC_FLUID || mat_type == MAT_PARA_MIST ||
+        mat_type == MAT_STICKY_FERRO ||
         mat_type == MAT_FLUID || mat_type == MAT_FLAMMABLE_FLUID) {
         // Fluid EOS ceiling: 40x E. For ferrofluid E=4200 → 168000 Pa,
         // comfortably above the max Tait pressure at the J_safe floor

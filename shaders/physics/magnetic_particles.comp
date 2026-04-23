@@ -23,6 +23,9 @@ const uint MAT_FERRO_FLUID = 31u;
 const uint MAT_MAG_SOFT_IRON = 57u;
 const uint MAT_MAGNETIC_RUBBER = 58u;
 const uint MAT_HEAVY_FERRO_FLUID = 67u;
+const uint MAT_DIAMAGNETIC_FLUID = 68u;
+const uint MAT_PARA_MIST = 69u;
+const uint MAT_STICKY_FERRO = 70u;
 const float FIXED_SCALE = 256.0;
 
 float langevin_response(float hmag, float saturation, float alpha) {
@@ -60,7 +63,9 @@ void main() {
     uint p = u_offset + idx;
     uint mat = material_ids[p];
     if (mat != MAT_FERRO_FLUID && mat != MAT_HEAVY_FERRO_FLUID &&
-        mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER) return;
+        mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER &&
+        mat != MAT_DIAMAGNETIC_FLUID && mat != MAT_PARA_MIST &&
+        mat != MAT_STICKY_FERRO) return;
 
     vec2 pos = positions[p];
     vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
@@ -75,6 +80,7 @@ void main() {
 
     float saturation = 0.0;
     float alpha = 0.0;
+    float polarity = 1.0; // +1 = aligns with H (paramagnetic); -1 = opposes (diamagnetic)
     if (mat == MAT_FERRO_FLUID) {
         saturation = 3.5;
         alpha = 1.0 * mix(1.0, 0.72, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
@@ -90,14 +96,36 @@ void main() {
     } else if (mat == MAT_MAG_SOFT_IRON) {
         saturation = 11.0;
         alpha = 1.5;
+    } else if (mat == MAT_DIAMAGNETIC_FLUID) {
+        // Diamagnetic: M anti-parallel to H. Saturation is low (real
+        // diamagnets have tiny chi) but not zero so there's a visible
+        // effect. Kelvin force in mpm_g2p.comp uses negative chi too,
+        // so the particle is pushed AWAY from field gradients.
+        saturation = 1.8;
+        alpha = 0.6;
+        polarity = -1.0;
+    } else if (mat == MAT_PARA_MIST) {
+        // Light wispy paramagnetic aerosol. Extremely weak response —
+        // barely magnetizes, barely pulled. Drifts along field lines
+        // rather than clumping. Low density makes it float visibly.
+        saturation = 1.0;
+        alpha = 0.35;
+    } else if (mat == MAT_STICKY_FERRO) {
+        // High-saturation ferro with very fast alpha — particles lock
+        // in at full M under almost any field. Combined with high
+        // fluid stress clamp elsewhere, this produces big globular
+        // clumps instead of tall spikes.
+        saturation = 10.0;
+        alpha = 2.2;
     } else {
+        // MAT_MAGNETIC_RUBBER
         saturation = 6.2;
         alpha = 1.15;
     }
 
     float induced = langevin_response(hmag, saturation, alpha);
     if (induced <= 1e-5) return;
-    vec2 M = dir * (induced * u_source_scale);
+    vec2 M = dir * (induced * polarity * u_source_scale);
 
     vec2 texel = uv * vec2(u_resolution) - vec2(0.5);
     ivec2 base = ivec2(floor(texel));
@@ -108,7 +136,9 @@ void main() {
     atomic_add_sample(base + ivec2(0, 1), M, (1.0 - f.x) * f.y);
     atomic_add_sample(base + ivec2(1, 1), M, f.x * f.y);
 
-    if (mat == MAT_FERRO_FLUID || mat == MAT_HEAVY_FERRO_FLUID) {
+    if (mat == MAT_FERRO_FLUID || mat == MAT_HEAVY_FERRO_FLUID ||
+        mat == MAT_DIAMAGNETIC_FLUID || mat == MAT_PARA_MIST ||
+        mat == MAT_STICKY_FERRO) {
         atomic_add_occ(base + ivec2(0, 0), (1.0 - f.x) * (1.0 - f.y));
         atomic_add_occ(base + ivec2(1, 0), f.x * (1.0 - f.y));
         atomic_add_occ(base + ivec2(0, 1), (1.0 - f.x) * f.y);
