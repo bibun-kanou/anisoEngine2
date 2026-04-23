@@ -6714,8 +6714,12 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
         // debug-view-5 — you can see scene magnets + ferrofluid magnetization
         // without opening the debug panel or holding M. When both this AND
         // the magnetic debug view 5 are on, the same shader runs.
+        //
+        // While on, we also auto-seed a very weak probe cursor at the mouse
+        // position (see the main input block) so the overlay always has
+        // something to show even in scenes without permanent magnets.
         ImGui::Checkbox("Show Magnetic Field", &g_show_mag_field_overlay);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader: colored vectors for scene magnets + ferrofluid self-magnetization. Independent of the debug panel and the M hotkey. Also triggers the solver automatically.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader: shows scene magnets, ferrofluid magnetization, and a weak mouse-anchored probe cursor. Independent of the debug panel and the M hotkey. Also auto-runs the solver each frame.");
         if (g_show_mag_field_overlay) {
             ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up to see subtle far-field regions that would otherwise disappear.");
@@ -8225,6 +8229,17 @@ int main(int, char**) {
                 // than the average scene magnet — enough to visibly distort the
                 // field even in strong-field scenes.
                 magp.cursor_strength = g_magnet_strength * 0.09f;
+            } else if (g_show_mag_field_overlay) {
+                // Global field-viz toggle auto-seeds a weak probe cursor at
+                // the mouse position, so the overlay has SOMETHING to show
+                // even if the scene has no permanent magnets and M isn't
+                // being held. Strength is well below holding M (~8% of the
+                // brush strength) so it doesn't noticeably pull particles,
+                // but it's strong enough to produce a visible field pattern
+                // and to seed ferrofluid magnetization for self-clustering
+                // demos. If the user then holds M, the full brush strength
+                // takes over.
+                magp.cursor_strength = g_magnet_strength * 0.007f;
             }
         }
 
