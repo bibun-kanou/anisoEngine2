@@ -622,10 +622,10 @@ void main() {
         // Older values (1.8, 5.5) were deliberately below gravity which is why
         // the fluid couldn't climb without disabling G. Bumped all to cleanly
         // overcome gravity in strong-field regions.
-        if (mat_type == 31u) { susceptibility = 0.22; max_mag_force = 14.0; }   // ferro: can climb, still subtle far-field
+        if (mat_type == 31u) { susceptibility = 0.14; max_mag_force = 9.0; }    // ferro: subtle climb, stable under weak ambient
         else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron unchanged
         else if (mat_type == 58u) { susceptibility = 0.34; max_mag_force = 6.0; }   // magnetic rubber: slightly stronger
-        else if (mat_type == 67u) { susceptibility = 1.30; max_mag_force = 38.0; }  // HEAVY ferro: aggressive climb + self-clustering
+        else if (mat_type == 67u) { susceptibility = 0.35; max_mag_force = 14.0; }  // HEAVY ferro: still climbs vs gravity (1.4g cap), no runaway self-collapse
         if (susceptibility > 0.0) {
             vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
             new_vel += mag_force * u_dt;

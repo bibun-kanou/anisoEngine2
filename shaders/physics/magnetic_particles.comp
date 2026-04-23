@@ -76,15 +76,17 @@ void main() {
     float saturation = 0.0;
     float alpha = 0.0;
     if (mat == MAT_FERRO_FLUID) {
-        saturation = 3.8;
-        alpha = 1.0 * mix(1.0, 0.72, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
+        saturation = 2.6;
+        alpha = 0.85 * mix(1.0, 0.72, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
     } else if (mat == MAT_HEAVY_FERRO_FLUID) {
-        // Aggressively high saturation + alpha so the fluid magnetizes
-        // strongly under almost any field, climbs against gravity cleanly,
-        // and self-clusters visibly even without an external magnet.
+        // Tuned down from (18, 3.4): with the ambient field feature, those
+        // peak-M values drove runaway dipole-dipole self-attraction at even
+        // 0.1 ambient. 7.5 / 2.2 still gives a strong, visible response to
+        // moderate fields (ambient ~3+ or M held) but a small puddle under
+        // a very weak ambient field no longer collapses to a point.
         // Curie-style thermal softening still applies.
-        saturation = 18.0;
-        alpha = 3.4 * mix(1.0, 0.80, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
+        saturation = 7.5;
+        alpha = 2.2 * mix(1.0, 0.80, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
     } else if (mat == MAT_MAG_SOFT_IRON) {
         saturation = 11.0;
         alpha = 1.5;
