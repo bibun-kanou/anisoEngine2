@@ -414,6 +414,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 24u) return vec4(1.0, 1.0, 0.88, 0.05);
     if (mat_type == 30u) return vec4(0.10, 0.85, 0.72, 0.04);
     if (mat_type == 31u) return vec4(0.00, 0.75, 0.72, 0.06);
+    if (mat_type == 67u) return vec4(0.00, 0.82, 0.68, 0.04);
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -577,6 +578,7 @@ void main() {
 
     float max_speed_cells = 3.0;
     if (mat_type == 31u) max_speed_cells = 0.45;      // ferro should never become ballistic shrapnel
+    else if (mat_type == 67u) max_speed_cells = 0.55; // heavy ferro: bit faster allowed for taller spikes, still not ballistic
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -618,6 +620,7 @@ void main() {
         if (mat_type == 31u) { susceptibility = 0.12; max_mag_force = 1.8; }   // ferro: low-frequency bulk drift only; interface shaping should dominate
         else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron: tiny translation aid only
         else if (mat_type == 58u) { susceptibility = 0.26; max_mag_force = 2.8; }   // magnetic rubber: shape response should dominate over raw pull
+        else if (mat_type == 67u) { susceptibility = 0.55; max_mag_force = 5.5; }   // HEAVY ferro: strong bulk pull + strong self-clustering
         if (susceptibility > 0.0) {
             vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
             new_vel += mag_force * u_dt;
@@ -626,10 +629,14 @@ void main() {
             }
         }
 
-        if (mat_type == 31u) {
+        if (mat_type == 31u || mat_type == 67u) {
             float hmag = sample_magnetic_field_smooth(pos).z;
-            float capillary_gate = 0.35 + 0.65 * smoothstep(0.18, 1.1, hmag);
-            new_vel += ferro_surface_force(pos) * capillary_gate * u_dt;
+            // Heavy ferro's surface force is scaled up so spikes stretch
+            // further against gravity and the fluid self-clumps aggressively.
+            float capillary_gate = (mat_type == 67u ? 0.55 : 0.35)
+                                 + 0.65 * smoothstep(0.18, 1.1, hmag);
+            float amplify = (mat_type == 67u) ? 1.85 : 1.0;
+            new_vel += ferro_surface_force(pos) * (capillary_gate * amplify) * u_dt;
         }
     }
 
@@ -864,7 +871,7 @@ void main() {
                          mat_type == 47u || mat_type == 48u ||
                          mat_type == 49u || mat_type == 62u ||
                          mat_type == 63u || mat_type == 64u || mat_type == 65u ||
-                         mat_type == 66u);
+                         mat_type == 66u || mat_type == 67u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||
@@ -1002,6 +1009,7 @@ void main() {
             else if (mat_type == 24u) material_cooling = 0.88;
             else if (mat_type == 30u) material_cooling = 0.68;
             else if (mat_type == 31u) material_cooling = 0.72;
+            else if (mat_type == 67u) material_cooling = 0.68;
             else if (mat_type == 32u) material_cooling = 0.62;
             else if (mat_type == 33u) material_cooling = 0.58;
             else if (mat_type == 34u) material_cooling = 0.78;
@@ -1487,6 +1495,14 @@ void main() {
                 float h_mag = (u_use_real_magnetics != 0) ? clamp(mf.z * 0.05, 0.0, 1.0) : 0.0;
                 vec3 ferro_c = mix(vec3(0.95, 0.55, 0.15), vec3(1.0, 0.80, 0.30), h_mag);
                 cur.rgb = mix(cur.rgb, ferro_c, 0.85);
+            } else if (mat_type == 67u) {
+                // Heavy ferrofluid: darker, more metallic tint so it's
+                // visually distinct from regular ferrofluid. Brightens
+                // harder under field because it magnetizes more strongly.
+                vec4 mf = sample_magnetic_field(pos);
+                float h_mag = (u_use_real_magnetics != 0) ? clamp(mf.z * 0.08, 0.0, 1.0) : 0.0;
+                vec3 heavy_c = mix(vec3(0.32, 0.28, 0.36), vec3(0.82, 0.58, 0.22), h_mag);
+                cur.rgb = mix(cur.rgb, heavy_c, 0.88);
             } else if (mat_type == 57u) {
                 vec4 mf = sample_magnetic_field(pos);
                 vec3 iron_c = mix(vec3(0.56, 0.60, 0.66), vec3(0.72, 0.78, 0.86), clamp(mf.z * 0.03, 0.0, 1.0));

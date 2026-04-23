@@ -432,6 +432,12 @@ struct CustomWeaponRecipe {
     ng::MPMMaterial shell_material = ng::MPMMaterial::STONEWARE;
     ng::f32 shell_stiffness = 110000.0f;
     ng::f32 shell_density  = 3.6f;
+    // Fraction of the bomb radius occupied by the shell. 0.10 = very thin
+    // (shell breaks easily on hard impact but gives payload more room);
+    // 0.40 = very thick (resists cracking, squeezes inner volume so pressure
+    // build-up per mg of gas is larger). Proportional to bomb size: a bigger
+    // g_ball_radius gives a physically thicker shell at the same ratio.
+    ng::f32 shell_thickness_ratio = 0.20f;
 
     // B2 Thermal Isolation
     bool     thermal_isolation = true;
@@ -1551,6 +1557,81 @@ static void collect_layered_bomb_layers(ng::vec2 center, ng::f32 radius, ng::f32
     }
 }
 
+// Parameterized variant used by CUSTOM and CUSTOM_PHYSICAL vessels so the user
+// can dial shell thickness live. All other call sites keep the hardcoded
+// thresholds in collect_layered_bomb_layers.
+//
+//   thickness_ratio = fraction of the bomb radius that is shell (outer ring).
+//   0.10 = thin wall, 0.20 = default, 0.40 = heavy casing.
+//
+// Given a shape with normalized metric m ∈ [0,1] (0 = center, 1 = edge), we
+// split concentric bands: shell in [1 − t, 1], armor + fuse + core evenly
+// share the inner [0, 1 − t]. This means a thicker shell squeezes the inner
+// volume (less room for gas) AND ends up with more particles per ring band,
+// both of which physically translate to "stronger pressure vessel".
+static void collect_custom_layered_layers(ng::vec2 center, ng::f32 radius, ng::f32 rotation,
+                                          ng::SpawnShape shape, ng::f32 spacing,
+                                          ng::f32 thickness_ratio,
+                                          std::vector<ng::vec2>& core_positions,
+                                          std::vector<ng::f32>& core_shell,
+                                          std::vector<ng::vec2>& fuse_positions,
+                                          std::vector<ng::f32>& fuse_shell,
+                                          std::vector<ng::vec2>& shell_positions,
+                                          std::vector<ng::f32>& shell_shell,
+                                          std::vector<ng::vec2>& armor_positions,
+                                          std::vector<ng::f32>& armor_shell) {
+    std::vector<ng::vec2> positions;
+    std::vector<ng::f32> shell_seeds;
+    build_projectile_points(center, radius, rotation, shape, spacing, positions, shell_seeds);
+
+    ng::vec2 half_extents = ng::shape_half_extents(shape, radius, projectile_shape_aspect(shape));
+    core_positions.clear();   core_shell.clear();
+    fuse_positions.clear();   fuse_shell.clear();
+    shell_positions.clear();  shell_shell.clear();
+    armor_positions.clear();  armor_shell.clear();
+
+    const ng::f32 t = glm::clamp(thickness_ratio, 0.05f, 0.50f);
+    const ng::f32 shell_cut = 1.0f - t;                      // shell is [shell_cut, 1]
+    // Inner region [0, shell_cut] split roughly evenly into armor / fuse / core.
+    const ng::f32 armor_cut = shell_cut * 0.72f;             // armor is [armor_cut, shell_cut]
+    const ng::f32 fuse_cut  = shell_cut * 0.36f;             // fuse  is [fuse_cut,  armor_cut]
+
+    for (const ng::vec2& world : positions) {
+        ng::vec2 local = rotate_vec2(world - center, -rotation);
+        ng::f32 metric = projectile_boundary_metric(local, shape, half_extents);
+        if (metric >= shell_cut) {
+            shell_positions.push_back(world);
+            shell_shell.push_back(1.0f);
+        } else if (metric >= armor_cut) {
+            armor_positions.push_back(world);
+            armor_shell.push_back(glm::mix(0.38f, 0.82f, (metric - armor_cut) / glm::max(shell_cut - armor_cut, 1e-4f)));
+        } else if (metric >= fuse_cut) {
+            fuse_positions.push_back(world);
+            fuse_shell.push_back(glm::mix(0.18f, 0.40f, (metric - fuse_cut) / glm::max(armor_cut - fuse_cut, 1e-4f)));
+        } else {
+            core_positions.push_back(world);
+            core_shell.push_back(metric * 0.10f);
+        }
+    }
+
+    // Fallbacks so a weird combination of shape + tiny thickness still gets
+    // at least one fuse or core particle.
+    if (core_positions.empty()) {
+        for (const ng::vec2& world : positions) {
+            ng::vec2 local = rotate_vec2(world - center, -rotation);
+            ng::f32 metric = projectile_boundary_metric(local, shape, half_extents);
+            if (metric <= fuse_cut * 0.5f) {
+                core_positions.push_back(world);
+                core_shell.push_back(metric * 0.12f);
+            }
+        }
+    }
+    if (fuse_positions.empty() && !armor_positions.empty()) {
+        fuse_positions.push_back(armor_positions.front());
+        fuse_shell.push_back(0.24f);
+    }
+}
+
 static void collect_claymore_payload(ng::vec2 center, ng::f32 radius, ng::f32 rotation,
                                      ng::SpawnShape shape, ng::f32 spacing,
                                      std::vector<ng::vec2>& payload_positions,
@@ -2425,9 +2506,24 @@ static void fire_projectile(ng::vec2 origin) {
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CONCUSSION ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM_PHYSICAL)) {
-            collect_layered_bomb_layers(origin, g_ball_radius, launch_angle, shape, spacing,
-                                        core_positions, core_shell, fuse_positions, fuse_shell,
-                                        shell_positions, shell_shell, armor_positions, armor_shell);
+            // CUSTOM and CUSTOM_PHYSICAL use a parameterized collector so the
+            // shell thickness slider on the recipe takes effect. Every other
+            // preset uses the hardcoded layer ratios in the default collector.
+            if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM) {
+                collect_custom_layered_layers(origin, g_ball_radius, launch_angle, shape, spacing,
+                                              g_custom_recipe.shell_thickness_ratio,
+                                              core_positions, core_shell, fuse_positions, fuse_shell,
+                                              shell_positions, shell_shell, armor_positions, armor_shell);
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM_PHYSICAL) {
+                collect_custom_layered_layers(origin, g_ball_radius, launch_angle, shape, spacing,
+                                              g_custom_physical_recipe.shell_thickness_ratio,
+                                              core_positions, core_shell, fuse_positions, fuse_shell,
+                                              shell_positions, shell_shell, armor_positions, armor_shell);
+            } else {
+                collect_layered_bomb_layers(origin, g_ball_radius, launch_angle, shape, spacing,
+                                            core_positions, core_shell, fuse_positions, fuse_shell,
+                                            shell_positions, shell_shell, armor_positions, armor_shell);
+            }
         } else {
             collect_real_bomb_layers(origin, g_ball_radius, launch_angle, shape, spacing,
                                      core_positions, core_shell, fuse_positions, fuse_shell, shell_positions, shell_shell);
@@ -5349,6 +5445,40 @@ static void draw_custom_weapon_diagram(const CustomWeaponRecipe& r) {
         shell_col = IM_COL32(220, 210, 220, 255);
     dl->AddRect(a, b, shell_col, 5.0f, 0, shell_thickness);
 
+    // --- Inner shell boundary = shell_thickness_ratio visualization ---
+    // Draws a dashed inner rectangle offset inward by ratio × min(w,h). The
+    // thicker the shell ratio, the smaller this inner box, so you can see
+    // how much radius is occupied by shell particles at a glance.
+    {
+        const float w = b.x - a.x;
+        const float h = b.y - a.y;
+        const float ratio = glm::clamp(r.shell_thickness_ratio, 0.05f, 0.50f);
+        const float inset_x = ratio * w;
+        const float inset_y = ratio * h;
+        if (inset_x > 4.0f && inset_y > 4.0f) {
+            const ImVec2 ia(a.x + inset_x, a.y + inset_y);
+            const ImVec2 ib(b.x - inset_x, b.y - inset_y);
+            ImU32 inner_col = IM_COL32(shell_col >> IM_COL32_R_SHIFT & 0xFF,
+                                       shell_col >> IM_COL32_G_SHIFT & 0xFF,
+                                       shell_col >> IM_COL32_B_SHIFT & 0xFF, 135);
+            // Dashed outline — 4 segments (top/bottom/left/right broken into pieces).
+            auto dashed_line = [&](float x0, float y0, float x1, float y1) {
+                const int segs = 7;
+                for (int i = 0; i < segs; i += 2) {
+                    float t0 = (float)i / (float)segs;
+                    float t1 = (float)(i + 1) / (float)segs;
+                    dl->AddLine(ImVec2(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0),
+                                ImVec2(x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1),
+                                inner_col, 1.2f);
+                }
+            };
+            dashed_line(ia.x, ia.y, ib.x, ia.y);  // top
+            dashed_line(ia.x, ib.y, ib.x, ib.y);  // bottom
+            dashed_line(ia.x, ia.y, ia.x, ib.y);  // left
+            dashed_line(ib.x, ia.y, ib.x, ib.y);  // right
+        }
+    }
+
     // --- Shell material pattern (overlay before anything else) ---
     // Each material has a subtle background fingerprint inside the shell so
     // you can see the shell type even without reading the stats table.
@@ -5676,8 +5806,8 @@ static void draw_custom_weapon_diagram(const CustomWeaponRecipe& r) {
         char a1[48], a2[48], a3[48];
 
         snprintf(a1, sizeof(a1), "%s", custom_shell_name(r.shell_material));
-        snprintf(a2, sizeof(a2), "E %.0fk", r.shell_stiffness * 0.001f);
-        snprintf(a3, sizeof(a3), "rho %.1fx", r.shell_density);
+        snprintf(a2, sizeof(a2), "E %.0fk  rho %.1fx", r.shell_stiffness * 0.001f, r.shell_density);
+        snprintf(a3, sizeof(a3), "wall %.0f%%", r.shell_thickness_ratio * 100.0f);
         row("B1 Shell", a1, a2, a3, IM_COL32(230, 230, 245, 255));
 
         if (r.thermal_isolation) {
@@ -5820,6 +5950,8 @@ static void draw_custom_weapon_editor(CustomWeaponRecipe& r, bool physical_mode)
         }
         ImGui::SliderFloat("Stiffness##shell", &r.shell_stiffness, 20000.0f, 200000.0f, "%.0f");
         ImGui::SliderFloat("Density scale##shell", &r.shell_density, 1.0f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Thickness ratio##shell", &r.shell_thickness_ratio, 0.08f, 0.45f, "%.2f");
+        help_blurb("Fraction of the bomb radius occupied by shell particles. Thicker shell = more particles in the outer band = harder to crack, plus it squeezes the inner volume so pressure builds faster per mg of gas. Scales with bomb size (g_ball_radius), so a bigger bomb at the same ratio gets a physically thicker wall.");
     }
 
     if (ImGui::CollapsingHeader("B2 Thermal Isolation")) {

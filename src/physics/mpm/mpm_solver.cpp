@@ -34,6 +34,8 @@ vec4 default_thermal_coupling(MPMMaterial material) {
             return vec4(0.10f, 0.85f, 0.72f, 0.04f);
         case MPMMaterial::FERRO_FLUID:
             return vec4(0.00f, 0.75f, 0.72f, 0.06f);
+        case MPMMaterial::HEAVY_FERRO_FLUID:
+            return vec4(0.00f, 0.82f, 0.68f, 0.04f);
         case MPMMaterial::MAILLARD:
             return vec4(0.30f, 0.65f, 0.60f, 0.08f);
         case MPMMaterial::MUSHROOM:
@@ -143,6 +145,7 @@ static vec4 material_spawn_color(MPMMaterial material) {
         case MPMMaterial::CHEESE_PULL:return vec4(0.98f, 0.84f, 0.44f, 1.0f);
         case MPMMaterial::MEMORY_WAX:return vec4(0.92f, 0.76f, 0.42f, 1.0f);
         case MPMMaterial::FERRO_FLUID:return vec4(0.95f, 0.55f, 0.15f, 1.0f);
+        case MPMMaterial::HEAVY_FERRO_FLUID:return vec4(0.32f, 0.28f, 0.38f, 1.0f);
         case MPMMaterial::MAILLARD:return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM:return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::CRUMB_LOAF:return vec4(0.95f, 0.80f, 0.54f, 1.0f);

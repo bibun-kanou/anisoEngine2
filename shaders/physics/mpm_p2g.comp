@@ -116,6 +116,7 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_ROOT_WEAVE 64u
 #define MAT_CELL_SHEET 65u
 #define MAT_ASH_REGROWTH 66u
+#define MAT_HEAVY_FERRO_FLUID 67u
 
 #include "common/mpm_utils.glsl"
 
@@ -330,6 +331,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_THERMO_METAL) return vec4(1.0, 1.0, 0.88, 0.05);
     if (mat_type == MAT_MEMORY_WAX) return vec4(0.10, 0.85, 0.72, 0.04);
     if (mat_type == MAT_FERRO_FLUID) return vec4(0.00, 0.75, 0.72, 0.06);
+    if (mat_type == MAT_HEAVY_FERRO_FLUID) return vec4(0.00, 0.82, 0.68, 0.04);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -491,7 +493,12 @@ void main() {
         stress = mat2(bulk * J * (J - J_rest));
         C *= (1.0 - vapor * 0.16);
     }
-    else if (mat_type == MAT_FERRO_FLUID) {
+    else if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_HEAVY_FERRO_FLUID) {
+        // Heavy variant reuses the Tait EOS + spike dynamics — it's the same
+        // fluid, just with much stronger magnetic response (tuned in the
+        // magnetic force block in mpm_g2p and Langevin saturation in
+        // magnetic_particles). That way all the surface-tension / spike code
+        // still applies and spikes can form.
         // ── Weakly compressible Tait EOS ──────────────────────────────
         // p = B * ((rho/rho0)^gamma - 1),  B = rho0 * c0^2 / gamma
         //
@@ -3663,8 +3670,8 @@ void main() {
     // nuking all meaningful fluid pressure response.
     float sn = length(vec4(stress[0], stress[1]));
     float ms;
-    if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_FLUID ||
-        mat_type == MAT_FLAMMABLE_FLUID) {
+    if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_HEAVY_FERRO_FLUID ||
+        mat_type == MAT_FLUID || mat_type == MAT_FLAMMABLE_FLUID) {
         // Fluid EOS ceiling: 40x E. For ferrofluid E=4200 → 168000 Pa,
         // comfortably above the max Tait pressure at the J_safe floor
         // of 0.7 (which is ~108000 Pa at c0=6). Tighter than the

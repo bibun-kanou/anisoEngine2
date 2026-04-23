@@ -22,6 +22,7 @@ uniform float u_source_scale;
 const uint MAT_FERRO_FLUID = 31u;
 const uint MAT_MAG_SOFT_IRON = 57u;
 const uint MAT_MAGNETIC_RUBBER = 58u;
+const uint MAT_HEAVY_FERRO_FLUID = 67u;
 const float FIXED_SCALE = 256.0;
 
 float langevin_response(float hmag, float saturation, float alpha) {
@@ -58,7 +59,8 @@ void main() {
 
     uint p = u_offset + idx;
     uint mat = material_ids[p];
-    if (mat != MAT_FERRO_FLUID && mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER) return;
+    if (mat != MAT_FERRO_FLUID && mat != MAT_HEAVY_FERRO_FLUID &&
+        mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER) return;
 
     vec2 pos = positions[p];
     vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
@@ -76,6 +78,12 @@ void main() {
     if (mat == MAT_FERRO_FLUID) {
         saturation = 3.8;
         alpha = 1.0 * mix(1.0, 0.72, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
+    } else if (mat == MAT_HEAVY_FERRO_FLUID) {
+        // Much higher saturation so spikes grow tall and the fluid clumps
+        // visibly onto itself even without an external magnet nearby.
+        // Curie-style thermal softening still applies but from a higher base.
+        saturation = 8.5;
+        alpha = 1.9 * mix(1.0, 0.78, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
     } else if (mat == MAT_MAG_SOFT_IRON) {
         saturation = 11.0;
         alpha = 1.5;
@@ -97,7 +105,7 @@ void main() {
     atomic_add_sample(base + ivec2(0, 1), M, (1.0 - f.x) * f.y);
     atomic_add_sample(base + ivec2(1, 1), M, f.x * f.y);
 
-    if (mat == MAT_FERRO_FLUID) {
+    if (mat == MAT_FERRO_FLUID || mat == MAT_HEAVY_FERRO_FLUID) {
         atomic_add_occ(base + ivec2(0, 0), (1.0 - f.x) * (1.0 - f.y));
         atomic_add_occ(base + ivec2(1, 0), f.x * (1.0 - f.y));
         atomic_add_occ(base + ivec2(0, 1), (1.0 - f.x) * f.y);

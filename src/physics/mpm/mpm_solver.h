@@ -82,6 +82,7 @@ enum class MPMMaterial : u32 {
     ROOT_WEAVE = 64,
     CELL_SHEET = 65,
     ASH_REGROWTH = 66,
+    HEAVY_FERRO_FLUID = 67,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);
