@@ -2044,6 +2044,16 @@ static void update_pressure_vessels(ng::f32 dt) {
             vessel.triggered = true;
             vessel.trigger_age = 0.0f;
         }
+        // Pressure-crossover is ALSO a trigger event, routed through the same
+        // delay fuse. This is what lets the user's delay work on bombs without
+        // a propellant or impact sensor — otherwise gas pressure would reach
+        // threshold and rupture instantly, bypassing the delay. For legacy
+        // pressure-only weapons with delay = 0, behavior is unchanged (delay
+        // of 0 fires same frame as the trigger).
+        if (!vessel.ruptured && !vessel.triggered && vessel.pressure > rupture_threshold) {
+            vessel.triggered = true;
+            vessel.trigger_age = 0.0f;
+        }
         vessel.prev_shell_speed = curr_shell_speed;
         vessel.prev_crack_avg = crack_avg;
 
@@ -2051,7 +2061,10 @@ static void update_pressure_vessels(ng::f32 dt) {
         // delay, the vessel actually ruptures. Axis-snap for PENETRATING_DOWN
         // happens here (at rupture frame) so the fuse delay is spent falling
         // along the flight axis — which is what lets a penetrator bury a bit
-        // before the downward burst fires.
+        // before the downward burst fires. Burst energy is picked based on
+        // which trigger fired (sensor trigger uses a flat burst, pressure
+        // crossover uses the overshoot × 1.8 formula so deeply-pressurized
+        // vessels still go off bigger).
         if (vessel.triggered && !vessel.ruptured) {
             vessel.trigger_age += dt;
             if (vessel.trigger_age >= vessel.trigger_to_rupture_delay) {
@@ -2064,16 +2077,10 @@ static void update_pressure_vessels(ng::f32 dt) {
                 vessel.ruptured = true;
                 vessel.rupture_age = 0.0f;
                 just_ruptured = true;
-                vessel.burst_energy += (3.6f + vessel.pressure * 0.8f) *
+                float overshoot = glm::max(vessel.pressure - rupture_threshold, 0.0f);
+                vessel.burst_energy += (3.0f + overshoot * 1.8f) *
                                        glm::max(vessel.burst_scale, 0.50f);
             }
-        }
-
-        if (!vessel.ruptured && vessel.pressure > rupture_threshold) {
-            vessel.ruptured = true;
-            vessel.rupture_age = 0.0f;
-            just_ruptured = true;
-            vessel.burst_energy += (3.0f + (vessel.pressure - rupture_threshold) * 1.8f) * vessel.burst_scale;
         }
         if (vessel.rupture_age >= 0.0f) {
             vessel.rupture_age += dt;
