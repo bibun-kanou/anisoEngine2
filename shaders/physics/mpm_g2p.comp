@@ -446,6 +446,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 73u) return vec4(0.02, 0.95, 0.82, 0.04); // eddy copper: highly thermally coupled
     if (mat_type == 74u) return vec4(0.02, 0.80, 0.80, 0.04); // hard magnet: moderate conductivity
     if (mat_type == 75u) return vec4(0.02, 0.92, 0.78, 0.03); // sand: low thermal coupling (dry granular)
+    if (mat_type == 76u) return vec4(0.04, 0.90, 0.70, 0.05); // phase-brittle: ceramic-like, modest thermal response
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -664,6 +665,7 @@ void main() {
     else if (mat_type == 73u) max_speed_cells = 1.00; // eddy copper: a bit faster than ferro (heating comes from motion)
     else if (mat_type == 74u) max_speed_cells = 0.55; // hard magnet: solid, heavy
     else if (mat_type == 75u) max_speed_cells = 1.10; // sand: granular flow — grains can move briskly
+    else if (mat_type == 76u) max_speed_cells = 0.90; // phase-brittle: solid cap, shatters on overload
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -1041,7 +1043,7 @@ void main() {
                          mat_type == 66u || mat_type == 67u || mat_type == 68u ||
                          mat_type == 69u || mat_type == 70u || mat_type == 71u ||
                          mat_type == 72u || mat_type == 73u || mat_type == 74u ||
-                         mat_type == 75u);
+                         mat_type == 75u || mat_type == 76u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||

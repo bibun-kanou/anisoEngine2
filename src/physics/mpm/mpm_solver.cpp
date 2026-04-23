@@ -52,6 +52,8 @@ vec4 default_thermal_coupling(MPMMaterial material) {
             return vec4(0.02f, 0.80f, 0.80f, 0.04f);
         case MPMMaterial::SAND_GRANULAR:
             return vec4(0.02f, 0.92f, 0.78f, 0.03f);
+        case MPMMaterial::PHASE_BRITTLE:
+            return vec4(0.04f, 0.90f, 0.70f, 0.05f);
         case MPMMaterial::MAILLARD:
             return vec4(0.30f, 0.65f, 0.60f, 0.08f);
         case MPMMaterial::MUSHROOM:
@@ -170,6 +172,7 @@ static vec4 material_spawn_color(MPMMaterial material) {
         case MPMMaterial::EDDY_COPPER:return vec4(0.78f, 0.46f, 0.22f, 1.0f);      // warm copper
         case MPMMaterial::HARD_MAGNET:return vec4(0.24f, 0.22f, 0.34f, 1.0f);      // dark magnetite
         case MPMMaterial::SAND_GRANULAR:return vec4(0.88f, 0.78f, 0.50f, 1.0f);    // warm sand
+        case MPMMaterial::PHASE_BRITTLE:return vec4(0.82f, 0.86f, 0.92f, 1.0f);    // ceramic pale
         case MPMMaterial::MAILLARD:return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM:return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::CRUMB_LOAF:return vec4(0.95f, 0.80f, 0.54f, 1.0f);

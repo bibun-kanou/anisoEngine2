@@ -125,6 +125,7 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_EDDY_COPPER 73u
 #define MAT_HARD_MAGNET 74u
 #define MAT_SAND_GRANULAR 75u
+#define MAT_PHASE_BRITTLE 76u
 
 #include "common/mpm_utils.glsl"
 
@@ -348,6 +349,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_EDDY_COPPER) return vec4(0.02, 0.95, 0.82, 0.04);
     if (mat_type == MAT_HARD_MAGNET) return vec4(0.02, 0.80, 0.80, 0.04);
     if (mat_type == MAT_SAND_GRANULAR) return vec4(0.02, 0.92, 0.78, 0.03);
+    if (mat_type == MAT_PHASE_BRITTLE) return vec4(0.04, 0.90, 0.70, 0.05);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -439,7 +441,7 @@ void main() {
                          mat_type == MAT_CELL_SHEET || mat_type == MAT_ASH_REGROWTH ||
                          mat_type == MAT_SUPERCONDUCTOR || mat_type == MAT_CURIE_FERRO ||
                          mat_type == MAT_EDDY_COPPER || mat_type == MAT_HARD_MAGNET ||
-                         mat_type == MAT_SAND_GRANULAR);
+                         mat_type == MAT_SAND_GRANULAR || mat_type == MAT_PHASE_BRITTLE);
     float sig_min = is_solid_mat ? 0.5 : 0.1;  // Solids: max 50% compression
     float sig_max = is_solid_mat ? 3.0 : 8.0;
     svd.sigma = clamp(svd.sigma, vec2(sig_min), vec2(sig_max));
@@ -3737,6 +3739,40 @@ void main() {
         // Neo-Hookean on the projected F — only the elastic part drives stress.
         stress = 2.0 * mu * (F - R_new) * transpose(F)
                + lambda * (J_new - 1.0) * J_new * mat2(1.0);
+    }
+    else if (mat_type == MAT_PHASE_BRITTLE) {
+        // Phase-field fracture (Wolper-style CD-MPM, simplified):
+        //   - damage `d` in [0,1]: 0 intact, 1 fully cracked.
+        //   - elastic energy density ψ drives growth when it exceeds
+        //     a threshold ψ_c. In strain invariants:
+        //       ψ ≈ μ * Σ(eps_i^2) + 0.5*λ * (Σeps_i)^2  (neo-Hookean analogue)
+        //   - Growth:  dd/dt = k_grow * max(ψ - ψ_c, 0) * (1 - d)
+        //     — drives toward 1 without overshooting, rate scaled by
+        //     excess energy.
+        //   - Stress degradation:  σ_eff = (1 - d)^2 * σ_elastic
+        //     — quadratic so fully-cracked material carries no load.
+        // This is simpler than the full Laplacian-regularized AT2 PDE
+        // (which needs a grid transfer) but captures the key physics:
+        // energy-driven growth + proper quadratic softening.
+        vec2 eps_pb = vec2(log(max(svd.sigma.x, 1e-4)),
+                           log(max(svd.sigma.y, 1e-4)));
+        float psi = mu * (eps_pb.x * eps_pb.x + eps_pb.y * eps_pb.y)
+                  + 0.5 * lambda * pow(eps_pb.x + eps_pb.y, 2.0);
+        float psi_c = u_fracture_threshold * 0.001 + 2.0;
+        float d_curr = damage[idx];
+        float drive  = max(psi - psi_c, 0.0);
+        float k_grow = 0.45 * fracture_rate + 0.6;
+        d_curr += k_grow * drive * (1.0 - d_curr) * u_dt;
+        d_curr = clamp(d_curr, 0.0, 1.0);
+        damage[idx] = d_curr;
+        // Elastic stress from unbroken material
+        stress = 2.0 * mu * (F - R) * transpose(F)
+               + lambda * (J - 1.0) * J * mat2(1.0);
+        // Quadratic degradation — fully-cracked material stores no stress.
+        // The +0.02 floor prevents numerical collapse at d=1 but still
+        // produces visibly broken behavior.
+        float g = (1.0 - d_curr);
+        stress *= (g * g + 0.02);
     }
     else {
         // ELASTIC + THERMAL fallback

@@ -91,6 +91,7 @@ enum class MPMMaterial : u32 {
     EDDY_COPPER = 73,
     HARD_MAGNET = 74,
     SAND_GRANULAR = 75,
+    PHASE_BRITTLE = 76,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);
