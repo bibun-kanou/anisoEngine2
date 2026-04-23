@@ -80,7 +80,12 @@ void main() {
     vec2 dir = H / mag;
     vec2 tangent = vec2(-dir.y, dir.x);
     float hue = atan(dir.y, dir.x) / 6.2831853 + 0.5;
-    float mag_norm = 1.0 - exp(-mag * 0.09);
+    // Tone curve coefficient: brush-field magnitudes are ~10-500 near cursor,
+    // but real-field magnitudes (sampled from the solver texture) can be
+    // orders of magnitude smaller. 0.5 is a compromise — still saturates
+    // cleanly for brush peaks, but gives real-field regions enough
+    // sensitivity that a modest exposure multiplier can push them visible.
+    float mag_norm = 1.0 - exp(-mag * 0.5);
 
     float lane = dot(world - u_brush_pos, tangent) * 13.0;
     float along = dot(world - u_brush_pos, dir) * 9.0;

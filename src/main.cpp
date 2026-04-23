@@ -4965,7 +4965,7 @@ static void render_magnetic_field_shader_overlay(ng::f32 time) {
     g_magnetic_field_vis_shader.set_float("u_brush_spike_strength", mp.magnet_spike_strength);
     g_magnetic_field_vis_shader.set_float("u_brush_spike_freq", mp.magnet_spike_freq);
     g_magnetic_field_vis_shader.set_float("u_overlay_alpha", 0.72f);
-    g_magnetic_field_vis_shader.set_float("u_exposure", glm::clamp(g_mag_field_exposure, 0.05f, 40.0f));
+    g_magnetic_field_vis_shader.set_float("u_exposure", glm::clamp(g_mag_field_exposure, 0.05f, 500.0f));
     if (real_active) {
         g_magnetic.bind_field_for_read(7);
         g_magnetic_field_vis_shader.set_int("u_field_tex", 7);
@@ -5034,6 +5034,14 @@ static UiWinRect g_rect_presets;
 // of an existing window, jump X past the right edge of the rightmost
 // overlapper on this row — that's much faster than pixel-stepping, and
 // produces tidier packing.
+//
+// Phase 2 (tall-window fallback): if the window is taller than the viewport
+// (or the viewport is packed top-to-bottom), the grid scan won't find a
+// fitting slot. Rather than defaulting to top-left (which overlaps the first
+// window placed), we do an X-only scan at y=vp_min.y that treats the new
+// window as full-viewport-tall — picking the first X that clears every
+// existing window's X interval. The window then extends past vp_max.y but
+// at least sits in its own column.
 static ImVec2 find_free_slot(ImVec2 size, const std::vector<const UiWinRect*>& occupied,
                              ImVec2 vp_min, ImVec2 vp_max) {
     const float gap = 10.0f;
@@ -5046,6 +5054,7 @@ static ImVec2 find_free_slot(ImVec2 size, const std::vector<const UiWinRect*>& o
         return !(x1 + gap <= rx0 || x0 >= rx1 + gap);
     };
 
+    // Phase 1 — grid scan. Requires window to fit inside the viewport.
     float y = vp_min.y;
     while (y + size.y <= vp_max.y + 1.0f) {
         float x = vp_min.x;
@@ -5074,8 +5083,27 @@ static ImVec2 find_free_slot(ImVec2 size, const std::vector<const UiWinRect*>& o
         if (next_y > vp_max.y) break;
         y = next_y + gap;
     }
-    // Fallback — nothing fit; stack at top-left (user will need to drag).
-    return ImVec2(vp_min.x, vp_min.y);
+
+    // Phase 2 — window didn't fit vertically anywhere. Ignore y-overlap
+    // (assume the new window spans the whole viewport vertically) and find
+    // the first X interval clear of every other visible window's X interval.
+    float fx = vp_min.x;
+    while (fx + size.x <= vp_max.x + 1.0f) {
+        float max_right_edge = -1e9f;
+        for (const UiWinRect* r : occupied) {
+            if (!r->visible) continue;
+            if (!x_hits(fx, fx + size.x, r)) continue;
+            max_right_edge = glm::max(max_right_edge, r->pos.x + r->size.x);
+        }
+        if (max_right_edge < 0.0f) {
+            return ImVec2(fx, vp_min.y);
+        }
+        fx = max_right_edge + gap;
+    }
+
+    // Last resort — viewport is packed horizontally too. Right-align at top
+    // so the window at least doesn't cover whatever's on the left.
+    return ImVec2(glm::max(vp_min.x, vp_max.x - size.x), vp_min.y);
 }
 
 static void draw_window_toggle_button(const char* label, bool* open, ImVec4 accent) {
@@ -6779,8 +6807,8 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
         ImGui::Checkbox("Show Magnetic Field", &g_show_mag_field_overlay);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader. Shows the field produced by scene magnets + ferrofluid magnetization. Requires at least one magnetic source (scene magnet, or M held) to show anything; ferrofluid alone produces no field because it needs an external seed to magnetize.");
         if (g_show_mag_field_overlay) {
-            ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up to see subtle far-field regions that would otherwise disappear.");
+            ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 500.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up (into the hundreds) to see weak ferrofluid-induced fields; real scene magnets usually only need ~5-20.");
             // Keep the solver running each frame so the overlay always has a
             // live field to draw, even without holding M or arming Real Magnetics.
             g_magnetic.params().debug_force_active = true;
