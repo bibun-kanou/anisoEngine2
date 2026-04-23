@@ -4902,13 +4902,16 @@ static void draw_environment_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_environment_window) return;
 
     push_panel_style(accent);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    // Auto-layout position the first time the window appears, but after that
+    // remember the user's drag/resize choices.
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Environment", &g_show_environment_window)) {
         ImGui::End();
         pop_panel_style();
         return;
     }
+    ImGui::PushTextWrapPos(0.0f);
 
     ng::SPHParams& sp = const_cast<ng::SPHParams&>(g_sph.params());
     ng::MPMParams& mp = g_mpm.params();
@@ -4952,6 +4955,7 @@ static void draw_environment_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
         ImGui::TextDisabled("Hold B + LMB to blow air. Hold G/H/M for heat, cooling, and the temporary magnet brush.");
     }
 
+    ImGui::PopTextWrapPos();
     ImGui::End();
     pop_panel_style();
 }
@@ -4960,13 +4964,16 @@ static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_presets_window) return;
 
     push_panel_style(accent);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    // Auto-layout position the first time the window appears, but after that
+    // remember the user's drag/resize choices.
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Presets", &g_show_presets_window)) {
         ImGui::End();
         pop_panel_style();
         return;
     }
+    ImGui::PushTextWrapPos(0.0f);
 
     if (ImGui::CollapsingHeader("Runtime Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::Button("Automata Test")) {
@@ -5069,6 +5076,7 @@ static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
         ImGui::TextDisabled("These benches are tuned to make the air field and particle response easier to read before manual tweaking.");
     }
 
+    ImGui::PopTextWrapPos();
     ImGui::End();
     pop_panel_style();
 }
@@ -5161,8 +5169,18 @@ static int index_of_material(ng::MPMMaterial m, ng::MPMMaterial* arr, int n) {
     return 0;
 }
 
+// Small helper so all our "italic help blurbs" wrap at window width.
+static void help_blurb(const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+}
+
 static void draw_custom_weapon_editor() {
     CustomWeaponRecipe& r = g_custom_recipe;
+
+    // Wrap any Text/TextDisabled/TextWrapped inside this editor to window width.
+    ImGui::PushTextWrapPos(0.0f);
 
     draw_custom_weapon_diagram();
 
@@ -5245,67 +5263,239 @@ static void draw_custom_weapon_editor() {
         ImGui::SliderFloat("Leak scale", &r.leak_scale, 0.2f, 4.0f, "%.2f");
     }
 
-    // Presets / shortcuts for quickly setting up common bomb archetypes
+    // Presets / shortcuts for quickly setting up common bomb archetypes.
+    // Grouped into TreeNodes so the button list doesn't take over the panel.
     ImGui::Separator();
     ImGui::TextDisabled("Load a starting recipe:");
-    if (ImGui::Button("Contact Charge")) {
-        r = CustomWeaponRecipe{};
+
+    auto preset_button = [&](const char* label, const char* tip, auto apply) {
+        if (ImGui::Button(label)) {
+            r = CustomWeaponRecipe{};
+            apply();
+        }
+        if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    };
+
+    if (ImGui::TreeNodeEx("Contact-triggered", ImGuiTreeNodeFlags_DefaultOpen)) {
+        preset_button("Contact Charge", "Default sealed contact bomb.", []{});
+        ImGui::SameLine();
+        preset_button("Impact Rocket",
+                      "Propels for 2.5 s, pops on contact.", []{
+            auto& r2 = g_custom_recipe;
+            r2.propellant_enabled = true;
+            r2.thrust_scale = 5.2f;
+            r2.nozzle_open = 0.50f;
+            r2.propellant_duration = 2.5f;
+            r2.fuse_initial_temp = 490.0f;
+            r2.fuse_rest_temp = 490.0f;
+        });
+        ImGui::SameLine();
+        preset_button("Penetrator",
+                      "Dense body, 120 ms dig-in delay, burst redirects downward.", []{
+            auto& r2 = g_custom_recipe;
+            r2.penetrate_on_impact = true;
+            r2.crack_rate_threshold = 1.8f;
+            r2.delay_ms = 120.0f;
+            r2.shell_density = 5.6f;
+            r2.payload_density = 7.2f;
+        });
+
+        preset_button("Bunker Buster",
+                      "Heavy penetrator with a bigger payload and longer dig-in fuse.", []{
+            auto& r2 = g_custom_recipe;
+            r2.penetrate_on_impact = true;
+            r2.crack_rate_threshold = 2.2f;
+            r2.delay_ms = 260.0f;
+            r2.shell_density = 8.5f;
+            r2.shell_stiffness = 180000.0f;
+            r2.burst_scale = 1.1f;
+            r2.payload_density = 9.0f;
+            r2.payload_push_scale = 6.5f;
+        });
+        ImGui::SameLine();
+        preset_button("Stun Grenade",
+                      "Huge push, near-zero heat, no payload. Good for knock-back.", []{
+            auto& r2 = g_custom_recipe;
+            r2.payload_enabled = false;
+            r2.burst_scale = 1.00f;
+            r2.plume_push_scale = 3.30f;
+            r2.plume_heat_scale = 0.04f;
+            r2.blast_push_scale = 3.40f;
+            r2.blast_heat_scale = 0.05f;
+            r2.delay_ms = 10.0f;
+        });
+        ImGui::SameLine();
+        preset_button("Concussion",
+                      "High pressure wave, low heat, no fragments.", []{
+            auto& r2 = g_custom_recipe;
+            r2.payload_enabled = false;
+            r2.burst_scale = 1.50f;
+            r2.plume_push_scale = 2.50f;
+            r2.plume_heat_scale = 0.20f;
+            r2.blast_push_scale = 2.80f;
+            r2.blast_heat_scale = 0.15f;
+            r2.delay_ms = 20.0f;
+        });
+
+        preset_button("Incendiary",
+                      "Heat-heavy contact charge. Sets everything on fire on contact.", []{
+            auto& r2 = g_custom_recipe;
+            r2.burst_scale = 0.80f;
+            r2.plume_push_scale = 0.90f;
+            r2.plume_heat_scale = 2.60f;
+            r2.blast_push_scale = 0.85f;
+            r2.blast_heat_scale = 2.40f;
+            r2.payload_material = ng::MPMMaterial::FIRECRACKER;
+            r2.payload_push_scale = 3.0f;
+            r2.payload_cone = 0.20f;
+            r2.payload_directionality = 0.20f; // mostly radial, some forward
+            r2.delay_ms = 30.0f;
+        });
+        ImGui::SameLine();
+        preset_button("Cluster Bomb",
+                      "Radial spray of FIRECRACKER sub-munitions that each cook off.", []{
+            auto& r2 = g_custom_recipe;
+            r2.burst_scale = 0.70f;
+            r2.payload_material = ng::MPMMaterial::FIRECRACKER;
+            r2.payload_stiffness = 14000.0f;
+            r2.payload_density = 1.8f;
+            r2.payload_push_scale = 4.0f;
+            r2.payload_cone = 0.02f;           // near-zero cone → wide spread
+            r2.payload_directionality = 0.0f;  // radial
+            r2.side_blast_scale = 1.2f;
+            r2.axis_bias = 0.4f;
+            r2.delay_ms = 40.0f;
+        });
+        ImGui::SameLine();
+        preset_button("Side Burst",
+                      "Fragments fly perpendicular to flight axis on impact.", []{
+            auto& r2 = g_custom_recipe;
+            r2.side_blast_scale = 3.4f;
+            r2.payload_push_scale = 3.6f;
+            r2.payload_cone = 0.02f;
+            r2.payload_directionality = 0.0f;
+            r2.delay_ms = 30.0f;
+        });
+
+        preset_button("Cryo Charge",
+                      "Cold shell + low heat + spray that cools its target rather than burns it.", []{
+            auto& r2 = g_custom_recipe;
+            r2.shell_material = ng::MPMMaterial::TOUGH;
+            r2.fuse_rest_temp = 300.0f;
+            r2.core_rest_temp = 240.0f;   // pulled DOWN below ambient
+            r2.fuse_initial_temp = 300.0f;
+            r2.plume_heat_scale = 0.06f;
+            r2.blast_heat_scale = 0.06f;
+            r2.burst_scale = 0.40f;
+            r2.plume_push_scale = 1.20f;
+            r2.payload_material = ng::MPMMaterial::BRITTLE;
+            r2.payload_push_scale = 3.2f;
+            r2.payload_cone = 0.10f;
+            r2.payload_directionality = 0.3f;
+            r2.delay_ms = 35.0f;
+        });
+        ImGui::TreePop();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Impact Rocket")) {
-        r = CustomWeaponRecipe{};
-        r.propellant_enabled = true;
-        r.thrust_scale = 5.2f;
-        r.nozzle_open = 0.50f;
-        r.propellant_duration = 2.5f;
-        r.fuse_initial_temp = 490.0f;
-        r.fuse_rest_temp = 490.0f;
+
+    if (ImGui::TreeNodeEx("Pressure / time-based", ImGuiTreeNodeFlags_DefaultOpen)) {
+        preset_button("Slow Pipe Bomb",
+                      "No sensors, no propellant. Pressure slowly builds then it pops.", []{
+            auto& r2 = g_custom_recipe;
+            r2.impact_rupture = false;
+            r2.crack_rate_threshold = 0.0f;
+            r2.rupture_scale = 2.20f;
+            r2.gas_source_scale = 0.90f;
+            r2.leak_scale = 0.50f;
+            r2.fuse_initial_temp = 620.0f;
+            r2.thermal_isolation = false;
+            r2.delay_ms = 0.0f;
+        });
+        ImGui::SameLine();
+        preset_button("Heavy Artillery",
+                      "Sealed timed shell with a huge plume and dense shrapnel.", []{
+            auto& r2 = g_custom_recipe;
+            r2.impact_rupture = false;
+            r2.rupture_scale = 3.00f;
+            r2.burst_scale = 2.00f;
+            r2.plume_push_scale = 2.50f;
+            r2.plume_heat_scale = 1.80f;
+            r2.blast_push_scale = 2.50f;
+            r2.blast_heat_scale = 1.40f;
+            r2.shell_density = 6.4f;
+            r2.payload_density = 7.0f;
+            r2.payload_push_scale = 5.6f;
+            r2.gas_source_scale = 1.10f;
+            r2.leak_scale = 0.60f;
+            r2.fuse_initial_temp = 640.0f;
+            r2.thermal_isolation = false;
+        });
+        ImGui::SameLine();
+        preset_button("Thermite Torch",
+                      "No payload. Long propellant duration pours sustained heat forward.", []{
+            auto& r2 = g_custom_recipe;
+            r2.payload_enabled = false;
+            r2.propellant_enabled = true;
+            r2.thrust_scale = 1.5f;
+            r2.nozzle_open = 0.35f;
+            r2.propellant_duration = 6.0f;
+            r2.fuse_initial_temp = 720.0f;
+            r2.fuse_rest_temp = 720.0f;
+            r2.plume_heat_scale = 2.80f;
+            r2.plume_push_scale = 0.35f;
+            r2.blast_heat_scale = 1.60f;
+            r2.blast_push_scale = 0.30f;
+            r2.rupture_scale = 11.0f;      // basically never ruptures
+            r2.impact_rupture = false;
+        });
+
+        preset_button("Proximity Mine",
+                      "Very sensitive crack sensor. Drops and waits for something to brush it.", []{
+            auto& r2 = g_custom_recipe;
+            r2.propellant_enabled = false;
+            r2.crack_rate_threshold = 0.6f;  // very sensitive
+            r2.delay_ms = 0.0f;
+            r2.burst_scale = 1.1f;
+            r2.payload_density = 4.8f;
+            r2.payload_cone = 0.30f;
+            r2.payload_directionality = 0.6f;
+        });
+        ImGui::SameLine();
+        preset_button("Smoke Screen",
+                      "Low-damage pop that dumps lots of smoke and moderate push.", []{
+            auto& r2 = g_custom_recipe;
+            r2.payload_enabled = false;
+            r2.burst_scale = 0.80f;
+            r2.plume_push_scale = 1.40f;
+            r2.plume_heat_scale = 0.12f;
+            r2.blast_push_scale = 0.70f;
+            r2.blast_heat_scale = 0.08f;
+            r2.delay_ms = 30.0f;
+            r2.gas_source_scale = 1.60f;
+            r2.leak_scale = 2.80f;
+        });
+        ImGui::SameLine();
+        preset_button("Reset",
+                      "Back to the plain default contact charge.", []{});
+        ImGui::TreePop();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Penetrator")) {
-        r = CustomWeaponRecipe{};
-        r.penetrate_on_impact = true;
-        r.crack_rate_threshold = 1.8f;
-        r.delay_ms = 120.0f;
-        r.shell_density = 5.6f;
-        r.payload_density = 7.2f;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Concussion")) {
-        r = CustomWeaponRecipe{};
-        r.payload_enabled = false;
-        r.burst_scale = 1.50f;
-        r.plume_push_scale = 2.50f;
-        r.plume_heat_scale = 0.20f;
-        r.blast_push_scale = 2.80f;
-        r.blast_heat_scale = 0.15f;
-        r.delay_ms = 20.0f;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Slow Pipe Bomb")) {
-        r = CustomWeaponRecipe{};
-        r.impact_rupture = false;      // no contact trigger — pressure only
-        r.crack_rate_threshold = 0.0f;
-        r.rupture_scale = 2.20f;       // low containment so gas ruptures it
-        r.gas_source_scale = 0.90f;
-        r.leak_scale = 0.50f;
-        r.fuse_initial_temp = 620.0f;
-        r.thermal_isolation = false;
-        r.delay_ms = 0.0f;
-    }
+
+    ImGui::PopTextWrapPos();
 }
 
 static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_interaction_window) return;
 
     push_panel_style(accent);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    // Auto-layout position the first time the window appears, but after that
+    // remember the user's drag/resize choices.
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Interaction", &g_show_interaction_window)) {
         ImGui::End();
         pop_panel_style();
         return;
     }
+    ImGui::PushTextWrapPos(0.0f);
 
     ng::MPMParams& mp = g_mpm.params();
 
@@ -5532,6 +5722,7 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
         }
     }
 
+    ImGui::PopTextWrapPos();
     ImGui::End();
     pop_panel_style();
 }
@@ -5540,13 +5731,16 @@ static void draw_backends_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_backends_window) return;
 
     push_panel_style(accent);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    // Auto-layout position the first time the window appears, but after that
+    // remember the user's drag/resize choices.
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Backends", &g_show_backends_window)) {
         ImGui::End();
         pop_panel_style();
         return;
     }
+    ImGui::PushTextWrapPos(0.0f);
 
     ng::SPHParams& sp = const_cast<ng::SPHParams&>(g_sph.params());
     ng::MPMParams& mp = g_mpm.params();
@@ -5613,6 +5807,7 @@ static void draw_backends_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extra non-physical heat disappearance inside SDF solids.");
     }
 
+    ImGui::PopTextWrapPos();
     ImGui::End();
     pop_panel_style();
 }
@@ -5621,13 +5816,16 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_appearance_window) return;
 
     push_panel_style(accent);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    // Auto-layout position the first time the window appears, but after that
+    // remember the user's drag/resize choices.
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Appearance", &g_show_appearance_window)) {
         ImGui::End();
         pop_panel_style();
         return;
     }
+    ImGui::PushTextWrapPos(0.0f);
 
     if (ImGui::CollapsingHeader("Visualization", ImGuiTreeNodeFlags_DefaultOpen)) {
         ng::SPHParams& sp = const_cast<ng::SPHParams&>(g_sph.params());
@@ -5731,6 +5929,7 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interactive diagram of all physics passes and their couplings.");
     }
 
+    ImGui::PopTextWrapPos();
     ImGui::End();
     pop_panel_style();
 }
@@ -5739,13 +5938,16 @@ static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_advanced_window) return;
 
     push_panel_style(accent);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    // Auto-layout position the first time the window appears, but after that
+    // remember the user's drag/resize choices.
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Advanced", &g_show_advanced_window)) {
         ImGui::End();
         pop_panel_style();
         return;
     }
+    ImGui::PushTextWrapPos(0.0f);
 
     ng::MPMParams& mp = g_mpm.params();
     auto& ac = g_air.config();
@@ -5855,6 +6057,7 @@ static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
         ImGui::TextWrapped("Current milestone path: MPM shell particles still write into the airtight cavity grid, while explicit shell/core pressure vessels add stronger internal gas build-up, directed venting, and hot blast coupling for bomb-style projectiles.");
     }
 
+    ImGui::PopTextWrapPos();
     ImGui::End();
     pop_panel_style();
 }
