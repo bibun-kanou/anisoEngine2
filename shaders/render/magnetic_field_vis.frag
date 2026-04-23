@@ -18,6 +18,7 @@ uniform float u_brush_spike_strength;
 uniform float u_brush_spike_freq;
 uniform float u_time;
 uniform float u_overlay_alpha;
+uniform float u_exposure;
 
 vec3 hsv_to_rgb(vec3 c) {
     vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
@@ -66,8 +67,11 @@ vec4 sample_brush_field(vec2 world) {
 void main() {
     vec2 world = mix(u_visible_world_min, u_visible_world_max, v_uv);
     vec4 field = (u_use_real_field != 0) ? sample_real_field(world) : sample_brush_field(world);
-    vec2 H = field.xy;
-    float mag = field.z;
+    // Apply exposure BEFORE the early-out so subtle far-field regions that
+    // would otherwise round to zero still show up when exposure is cranked.
+    float exposure = max(u_exposure, 0.001);
+    vec2 H = field.xy * exposure;
+    float mag = field.z * exposure;
     if (mag <= 1e-5) {
         frag_color = vec4(0.0);
         return;

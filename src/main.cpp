@@ -266,6 +266,13 @@ static bool g_show_size_hint = false;
 static bool g_show_heat_gizmos = false;
 static bool g_show_drag_debug = false;
 static bool g_show_magnetic_debug = false;
+// Always-on magnetic field shader overlay, decoupled from the debug view. Lets
+// the user see scene magnets + ferrofluid self-magnetization even without
+// opening the debug panel or holding M.
+static bool g_show_mag_field_overlay = false;
+// Exposure for the overlay visualization (1.0 = normal). Higher values expose
+// subtle far-field regions that would otherwise be invisible.
+static float g_mag_field_exposure = 1.0f;
 static bool g_show_pipeline = false;
 static bool g_show_pipeline_prev = false;
 static bool g_show_interaction_window = false;
@@ -4929,7 +4936,12 @@ static void draw_active_tooltip(InteractMode active_mode,
 }
 
 static void render_magnetic_field_shader_overlay(ng::f32 time) {
-    if (!g_show_magnetic_debug || g_magnetic_debug_view != 5) return;
+    // Enabled via either: the global "Show Magnetic Field" toggle, OR the
+    // debug-view-5 selection in the Magnetic Debug panel. Either source
+    // renders the same shader.
+    bool enabled_via_global  = g_show_mag_field_overlay;
+    bool enabled_via_debug_5 = g_show_magnetic_debug && g_magnetic_debug_view == 5;
+    if (!enabled_via_global && !enabled_via_debug_5) return;
 
     const bool real_active = g_magnetic.active();
     const ng::MPMParams& mp = g_mpm.params();
@@ -4953,6 +4965,7 @@ static void render_magnetic_field_shader_overlay(ng::f32 time) {
     g_magnetic_field_vis_shader.set_float("u_brush_spike_strength", mp.magnet_spike_strength);
     g_magnetic_field_vis_shader.set_float("u_brush_spike_freq", mp.magnet_spike_freq);
     g_magnetic_field_vis_shader.set_float("u_overlay_alpha", 0.72f);
+    g_magnetic_field_vis_shader.set_float("u_exposure", glm::clamp(g_mag_field_exposure, 0.05f, 40.0f));
     if (real_active) {
         g_magnetic.bind_field_for_read(7);
         g_magnetic_field_vis_shader.set_int("u_field_tex", 7);
@@ -6696,8 +6709,23 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
     if (ImGui::CollapsingHeader("Overlays / Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Drag Debug (arrows)", &g_show_drag_debug);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show per-particle drag arrows in spring-drag mode. May be slow with many particles.");
+
+        // Always-on field shader. This is the globally-accessible version of
+        // debug-view-5 — you can see scene magnets + ferrofluid magnetization
+        // without opening the debug panel or holding M. When both this AND
+        // the magnetic debug view 5 are on, the same shader runs.
+        ImGui::Checkbox("Show Magnetic Field", &g_show_mag_field_overlay);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader: colored vectors for scene magnets + ferrofluid self-magnetization. Independent of the debug panel and the M hotkey. Also triggers the solver automatically.");
+        if (g_show_mag_field_overlay) {
+            ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up to see subtle far-field regions that would otherwise disappear.");
+            // Keep the solver running each frame so the overlay always has a
+            // live field to draw, even without holding M or arming Real Magnetics.
+            g_magnetic.params().debug_force_active = true;
+        }
+
         ImGui::Checkbox("Magnetic Debug", &g_show_magnetic_debug);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show the magnetic field overlay. Scene-driven H views are the ones magnetic MPMs actually read.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Full magnetic debug panel with multiple views (vectors, |M|, Kelvin force, shader, etc).");
         if (g_show_magnetic_debug) {
             auto& mag_cfg = g_magnetic.params();
             ImGui::Combo("Magnetic View", &g_magnetic_debug_view, magnetic_debug_view_names, 9);

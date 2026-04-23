@@ -617,10 +617,15 @@ void main() {
     if (u_use_real_magnetics != 0) {
         float susceptibility = 0.0;
         float max_mag_force = 0.0;
-        if (mat_type == 31u) { susceptibility = 0.12; max_mag_force = 1.8; }   // ferro: low-frequency bulk drift only; interface shaping should dominate
-        else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron: tiny translation aid only
-        else if (mat_type == 58u) { susceptibility = 0.26; max_mag_force = 2.8; }   // magnetic rubber: shape response should dominate over raw pull
-        else if (mat_type == 67u) { susceptibility = 0.55; max_mag_force = 5.5; }   // HEAVY ferro: strong bulk pull + strong self-clustering
+        // Magnetic materials. `max_mag_force` caps peak body-force acceleration in m/s².
+        // Gravity is ~9.81, so to climb against it the ceiling must exceed that.
+        // Older values (1.8, 5.5) were deliberately below gravity which is why
+        // the fluid couldn't climb without disabling G. Bumped all to cleanly
+        // overcome gravity in strong-field regions.
+        if (mat_type == 31u) { susceptibility = 0.22; max_mag_force = 14.0; }   // ferro: can climb, still subtle far-field
+        else if (mat_type == 57u) { susceptibility = 0.0018; max_mag_force = 1.2; } // soft iron unchanged
+        else if (mat_type == 58u) { susceptibility = 0.34; max_mag_force = 6.0; }   // magnetic rubber: slightly stronger
+        else if (mat_type == 67u) { susceptibility = 1.30; max_mag_force = 38.0; }  // HEAVY ferro: aggressive climb + self-clustering
         if (susceptibility > 0.0) {
             vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
             new_vel += mag_force * u_dt;
@@ -631,11 +636,12 @@ void main() {
 
         if (mat_type == 31u || mat_type == 67u) {
             float hmag = sample_magnetic_field_smooth(pos).z;
-            // Heavy ferro's surface force is scaled up so spikes stretch
-            // further against gravity and the fluid self-clumps aggressively.
-            float capillary_gate = (mat_type == 67u ? 0.55 : 0.35)
-                                 + 0.65 * smoothstep(0.18, 1.1, hmag);
-            float amplify = (mat_type == 67u) ? 1.85 : 1.0;
+            // Heavy ferro's surface force is scaled up aggressively so spikes
+            // stretch tall and clumps compact even without a strong external
+            // source. Regular ferro stays subtle-but-visible.
+            float capillary_gate = (mat_type == 67u ? 0.70 : 0.42)
+                                 + 0.70 * smoothstep(0.18, 1.1, hmag);
+            float amplify = (mat_type == 67u) ? 3.2 : 1.1;
             new_vel += ferro_surface_force(pos) * (capillary_gate * amplify) * u_dt;
         }
     }

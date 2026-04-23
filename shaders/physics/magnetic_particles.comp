@@ -79,11 +79,12 @@ void main() {
         saturation = 3.8;
         alpha = 1.0 * mix(1.0, 0.72, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
     } else if (mat == MAT_HEAVY_FERRO_FLUID) {
-        // Much higher saturation so spikes grow tall and the fluid clumps
-        // visibly onto itself even without an external magnet nearby.
-        // Curie-style thermal softening still applies but from a higher base.
-        saturation = 8.5;
-        alpha = 1.9 * mix(1.0, 0.78, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
+        // Aggressively high saturation + alpha so the fluid magnetizes
+        // strongly under almost any field, climbs against gravity cleanly,
+        // and self-clusters visibly even without an external magnet.
+        // Curie-style thermal softening still applies.
+        saturation = 18.0;
+        alpha = 3.4 * mix(1.0, 0.80, clamp((temp - 360.0) / 400.0, 0.0, 1.0));
     } else if (mat == MAT_MAG_SOFT_IRON) {
         saturation = 11.0;
         alpha = 1.5;
