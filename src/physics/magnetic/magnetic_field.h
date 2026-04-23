@@ -122,6 +122,11 @@ private:
     GPUBuffer particle_magnet_x_buf_;
     GPUBuffer particle_magnet_y_buf_;
     GPUBuffer particle_occ_buf_;
+    // Per-particle persistent magnetization M (vec2). Lets each particle
+    // retain its magnetic state across frames — enables Preisach-style
+    // hysteresis, remanence, slow Curie transitions, and "magnetize by
+    // cooling then remove field" permanent-magnet gameplay.
+    GPUBuffer particle_m_prev_buf_;
     std::vector<vec4> debug_field_cache_;
     std::vector<vec4> debug_total_field_cache_;
     std::vector<vec2> debug_magnetization_cache_;

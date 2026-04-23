@@ -434,6 +434,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 71u) return vec4(0.00, 0.45, 0.95, 0.02); // superconductor: high conductivity cold-biased
     if (mat_type == 72u) return vec4(0.02, 0.72, 0.84, 0.06); // Curie ferro: moderate (transitions thermally)
     if (mat_type == 73u) return vec4(0.02, 0.95, 0.82, 0.04); // eddy copper: highly thermally coupled
+    if (mat_type == 74u) return vec4(0.02, 0.80, 0.80, 0.04); // hard magnet: moderate conductivity
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -621,6 +622,7 @@ void main() {
     else if (mat_type == 71u) max_speed_cells = 0.85; // superconductor: rigid solid, typical solid cap
     else if (mat_type == 72u) max_speed_cells = 0.65; // Curie ferro: solidly ferromagnetic below T_c
     else if (mat_type == 73u) max_speed_cells = 1.00; // eddy copper: a bit faster than ferro (heating comes from motion)
+    else if (mat_type == 74u) max_speed_cells = 0.55; // hard magnet: solid, heavy
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -682,6 +684,7 @@ void main() {
             susceptibility = 0.72 * below_curie;
             max_mag_force = 22.0 * below_curie;
         }
+        else if (mat_type == 74u) { susceptibility = 0.90; max_mag_force = 26.0; }  // HARD_MAGNET: remanent permanent magnet — strong Kelvin, retains M via persistent SSBO
         // MAT_EDDY_COPPER (73) — purely conductive, no Kelvin susceptibility.
         // The eddy heating is computed below, outside this force block.
         // abs() so diamagnetic (negative chi) also gets the force path.
@@ -961,7 +964,7 @@ void main() {
                          mat_type == 63u || mat_type == 64u || mat_type == 65u ||
                          mat_type == 66u || mat_type == 67u || mat_type == 68u ||
                          mat_type == 69u || mat_type == 70u || mat_type == 71u ||
-                         mat_type == 72u || mat_type == 73u);
+                         mat_type == 72u || mat_type == 73u || mat_type == 74u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||
@@ -1106,6 +1109,7 @@ void main() {
             else if (mat_type == 71u) material_cooling = 1.80; // superconductor: cools ultra-fast (cryogenic wanted)
             else if (mat_type == 72u) material_cooling = 0.85; // Curie ferro: moderate cooling rate
             else if (mat_type == 73u) material_cooling = 1.40; // eddy copper: good thermal conductor, radiates heat quickly
+            else if (mat_type == 74u) material_cooling = 0.75; // hard magnet: dense magnetite, retains heat
             else if (mat_type == 32u) material_cooling = 0.62;
             else if (mat_type == 33u) material_cooling = 0.58;
             else if (mat_type == 34u) material_cooling = 0.78;

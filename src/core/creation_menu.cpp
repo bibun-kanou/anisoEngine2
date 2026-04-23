@@ -257,6 +257,7 @@ vec4 default_material_color(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::SUPERCONDUCTOR: return vec4(0.72f, 0.90f, 1.00f, 1.0f);
         case MPMMaterial::CURIE_FERRO: return vec4(0.48f, 0.42f, 0.48f, 1.0f);
         case MPMMaterial::EDDY_COPPER: return vec4(0.78f, 0.46f, 0.22f, 1.0f);
+        case MPMMaterial::HARD_MAGNET: return vec4(0.24f, 0.22f, 0.34f, 1.0f);
         case MPMMaterial::MAILLARD: return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM: return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::ORTHO_BEND: return vec4(0.78f, 0.56f, 0.26f, 1.0f);
@@ -341,6 +342,7 @@ std::string technique_summary(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::SUPERCONDUCTOR: return "Type-I superconductor: below critical temperature (T_c ~180 K) becomes a PERFECT diamagnet (Meissner effect) — expels magnetic field entirely. Above T_c acts like regular metal. Try placing a cold block near a scene magnet: field visibly hollows around it. Heat it with G, the hollow collapses.";
         case MPMMaterial::CURIE_FERRO: return "Iron-like ferromagnet with a sharp Curie transition (T_Curie ~680 K). Below that it's a strong hard magnet; above it, demagnetized paramagnetic. Heat it to 'kill' its magnetism — visible 'spike collapse' when you pass a flame near a magnetized bar.";
         case MPMMaterial::EDDY_COPPER: return "Copper-analog conductor, NOT magnetic. Heats up when it moves through a magnetic field (eddy currents). Drag a block of it through a bar magnet region or hold M nearby and shake — watch it redden. Cools quickly when still.";
+        case MPMMaterial::HARD_MAGNET: return "Hard permanent magnet (magnetite-analog) with PERSISTENT magnetization. Expose it to a strong field (hold M near it for a couple seconds) and it locks in a magnetic moment — then it keeps magnetizing scene ferrofluid FOR SECONDS after you let go of M. This is hysteresis: M_prev decays at only ~0.3/s so on human timescales it behaves as a permanent magnet you just made.";
         case MPMMaterial::MAG_SOFT_IRON: return "Real magnetics benchmark: soft iron body that samples the solved magnetic field and pulls toward stronger |H|^2 regions.";
         case MPMMaterial::MAGNETIC_RUBBER: return "Real magnetics benchmark: compliant magnetizable solid that bends and drifts under the solved magnetic field.";
         case MPMMaterial::MAILLARD: return "Cooking surface model: browning, drying, shell-setting, and steam blistering without a full bread-like rise.";

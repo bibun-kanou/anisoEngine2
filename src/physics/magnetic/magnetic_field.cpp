@@ -16,6 +16,10 @@ constexpr u32 kObjectBinding = 18u;
 constexpr u32 kParticleMagXBinding = 19u;
 constexpr u32 kParticleMagYBinding = 20u;
 constexpr u32 kParticleOccBinding = 21u;
+constexpr u32 kParticleMPrevBinding = 22u;
+// Particle M is persistent across frames — size to the full particle
+// capacity so we can index by particle global index (offset + local).
+constexpr u32 kMaxParticles = 500000u;
 
 void init_scalar_texture(u32& texture, ivec2 resolution) {
     if (texture) glDeleteTextures(1, &texture);
@@ -65,6 +69,10 @@ void MagneticField::init(const Config& config) {
     particle_magnet_x_buf_.create(static_cast<size_t>(resolution_.x * resolution_.y) * sizeof(i32));
     particle_magnet_y_buf_.create(static_cast<size_t>(resolution_.x * resolution_.y) * sizeof(i32));
     particle_occ_buf_.create(static_cast<size_t>(resolution_.x * resolution_.y) * sizeof(i32));
+    // Per-particle persistent M — vec2 per particle slot, zero-init so
+    // fresh particles start unmagnetized.
+    particle_m_prev_buf_.create(static_cast<size_t>(kMaxParticles) * 2 * sizeof(f32));
+    particle_m_prev_buf_.clear();
 
     raster_shader_.load("shaders/physics/magnetic_rasterize.comp");
     particle_shader_.load("shaders/physics/magnetic_particles.comp");
@@ -175,7 +183,7 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         ComputeShader::barrier_image();
     };
 
-    auto rasterize_particle_magnetization = [&](u32 prev_field_tex) {
+    auto rasterize_particle_magnetization = [&](u32 prev_field_tex, bool write_state) {
         if (!particles) return;
         const auto& range = particles->range(SolverType::MPM);
         if (range.count == 0) return;
@@ -186,6 +194,7 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         particle_magnet_x_buf_.bind_base(kParticleMagXBinding);
         particle_magnet_y_buf_.bind_base(kParticleMagYBinding);
         particle_occ_buf_.bind_base(kParticleOccBinding);
+        particle_m_prev_buf_.bind_base(kParticleMPrevBinding);
         particles->positions().bind_base(Binding::POSITION);
         particles->temperatures().bind_base(Binding::TEMPERATURE);
         particles->material_ids().bind_base(Binding::MATERIAL_ID);
@@ -198,6 +207,13 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         particle_shader_.set_vec2("u_world_min", world_min_);
         particle_shader_.set_vec2("u_world_max", world_max_);
         particle_shader_.set_float("u_source_scale", params_.source_scale);
+        // Integration time — per-frame. Pass frame_dt directly; write_state
+        // is only true once per frame so there's no double-counting. For
+        // induction-passes (write_state=false) the shader computes a fresh
+        // target M without mutating the persistent state, which keeps the
+        // Jacobi-Poisson iteration self-consistent.
+        particle_shader_.set_float("u_dt", 1.0f / 60.0f);
+        particle_shader_.set_int("u_write_state", write_state ? 1 : 0);
         particle_shader_.dispatch_1d(range.count);
         ComputeShader::barrier_ssbo();
 
@@ -262,7 +278,9 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         // or collapse under perturbation because there's no magnetic volume cost.
         rasterize_magnetization(true, drive_field_tex_);
         if (i == induction_iterations - 1) {
-            rasterize_particle_magnetization(drive_field_tex_);
+            // Read-only during induction — we only want ONE state update
+            // per frame, on the final debug/visual pass below.
+            rasterize_particle_magnetization(drive_field_tex_, false);
         }
         solve_field_from_magnetization(drive_field_tex_);
     }
@@ -271,13 +289,15 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
     // folds in particle magnetization so drive includes demag feedback.
     if (induction_iterations == 0) {
         rasterize_magnetization(true, drive_field_tex_);
-        rasterize_particle_magnetization(drive_field_tex_);
+        rasterize_particle_magnetization(drive_field_tex_, false);
         solve_field_from_magnetization(drive_field_tex_);
     }
 
     // Debug/visual field: scene drive plus induced particle magnetization.
+    // write_state=true — this is the final particle pass per frame, so
+    // persistent M is updated once here, preserving hysteresis/remanence.
     rasterize_magnetization(true, drive_field_tex_);
-    rasterize_particle_magnetization(drive_field_tex_);
+    rasterize_particle_magnetization(drive_field_tex_, true);
     solve_field_from_magnetization(field_tex_);
 
     debug_cache_dirty_ = true;

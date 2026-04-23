@@ -89,6 +89,7 @@ enum class MPMMaterial : u32 {
     SUPERCONDUCTOR = 71,
     CURIE_FERRO = 72,
     EDDY_COPPER = 73,
+    HARD_MAGNET = 74,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);

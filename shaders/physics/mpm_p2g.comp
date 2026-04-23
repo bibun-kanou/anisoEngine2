@@ -123,6 +123,7 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_SUPERCONDUCTOR 71u
 #define MAT_CURIE_FERRO 72u
 #define MAT_EDDY_COPPER 73u
+#define MAT_HARD_MAGNET 74u
 
 #include "common/mpm_utils.glsl"
 
@@ -344,6 +345,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_SUPERCONDUCTOR) return vec4(0.00, 0.45, 0.95, 0.02);
     if (mat_type == MAT_CURIE_FERRO) return vec4(0.02, 0.72, 0.84, 0.06);
     if (mat_type == MAT_EDDY_COPPER) return vec4(0.02, 0.95, 0.82, 0.04);
+    if (mat_type == MAT_HARD_MAGNET) return vec4(0.02, 0.80, 0.80, 0.04);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -434,7 +436,7 @@ void main() {
                          mat_type == MAT_MORPH_TISSUE || mat_type == MAT_ROOT_WEAVE ||
                          mat_type == MAT_CELL_SHEET || mat_type == MAT_ASH_REGROWTH ||
                          mat_type == MAT_SUPERCONDUCTOR || mat_type == MAT_CURIE_FERRO ||
-                         mat_type == MAT_EDDY_COPPER);
+                         mat_type == MAT_EDDY_COPPER || mat_type == MAT_HARD_MAGNET);
     float sig_min = is_solid_mat ? 0.5 : 0.1;  // Solids: max 50% compression
     float sig_max = is_solid_mat ? 3.0 : 8.0;
     svd.sigma = clamp(svd.sigma, vec2(sig_min), vec2(sig_max));
@@ -675,15 +677,15 @@ void main() {
     }
     else if (mat_type == MAT_MAG_SOFT_IRON || mat_type == MAT_MAGNETIC_RUBBER ||
              mat_type == MAT_SUPERCONDUCTOR || mat_type == MAT_CURIE_FERRO ||
-             mat_type == MAT_EDDY_COPPER) {
+             mat_type == MAT_EDDY_COPPER || mat_type == MAT_HARD_MAGNET) {
         bool soft_rubber = (mat_type == MAT_MAGNETIC_RUBBER);
-        // Superconductor + Curie ferro behave like stiff iron solids; eddy
-        // copper is slightly softer (real copper has lower Young's modulus
-        // than iron but not by much).
+        // Hard magnet (magnetite-like) is brittle-stiff; superconductor
+        // very stiff when cold; eddy copper moderate.
         float stiff_mul = soft_rubber ? 0.65
                         : (mat_type == MAT_EDDY_COPPER ? 3.20
                         : (mat_type == MAT_SUPERCONDUCTOR ? 5.80
-                        : 4.80));
+                        : (mat_type == MAT_HARD_MAGNET ? 5.40
+                        : 4.80)));
         float E_mag = E * stiff_mul;
         float nu_mag = soft_rubber ? 0.36 : 0.34;
         float mu_mag = E_mag / (2.0 * (1.0 + nu_mag));

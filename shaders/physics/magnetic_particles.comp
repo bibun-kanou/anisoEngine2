@@ -9,6 +9,10 @@ layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; }
 layout(std430, binding = 19) coherent buffer ParticleMagX { int accum_x[]; };
 layout(std430, binding = 20) coherent buffer ParticleMagY { int accum_y[]; };
 layout(std430, binding = 21) coherent buffer ParticleOcc { int accum_occ[]; };
+// Per-particle persistent magnetization. Enables hysteresis, remanence,
+// and thermally-lagged Curie/Meissner transitions. Indexed by particle
+// GLOBAL index (u_offset + local).
+layout(std430, binding = 22) coherent buffer ParticleMPrev { vec2 particle_m_prev[]; };
 
 layout(binding = 0) uniform sampler2D u_prev_field_tex;
 
@@ -18,6 +22,11 @@ uniform ivec2 u_resolution;
 uniform vec2 u_world_min;
 uniform vec2 u_world_max;
 uniform float u_source_scale;
+// Relaxation integration. u_dt is per-frame time; write_state=1 exactly
+// once per frame on the final pass, so we update M_prev there (other
+// passes just read it for the Poisson-iteration self-consistency).
+uniform float u_dt;
+uniform int u_write_state;
 
 const uint MAT_FERRO_FLUID = 31u;
 const uint MAT_MAG_SOFT_IRON = 57u;
@@ -29,6 +38,7 @@ const uint MAT_STICKY_FERRO = 70u;
 const uint MAT_SUPERCONDUCTOR = 71u;   // Meissner effect: perfect diamagnet below T_c
 const uint MAT_CURIE_FERRO = 72u;      // ferromagnet that sharply loses M above T_Curie
 const uint MAT_EDDY_COPPER = 73u;      // non-magnetic conductor; heated by |v|^2*|H|^2 in mpm_g2p
+const uint MAT_HARD_MAGNET = 74u;      // Preisach-style remanence — very slow relaxation, retains M after field removed
 const float FIXED_SCALE = 256.0;
 
 // Critical temperatures for thermal-magnetic transitions (in Kelvin — match
@@ -75,7 +85,7 @@ void main() {
         mat != MAT_MAG_SOFT_IRON && mat != MAT_MAGNETIC_RUBBER &&
         mat != MAT_DIAMAGNETIC_FLUID && mat != MAT_PARA_MIST &&
         mat != MAT_STICKY_FERRO && mat != MAT_SUPERCONDUCTOR &&
-        mat != MAT_CURIE_FERRO) return; // EDDY_COPPER is non-magnetic — handled only in g2p heating path
+        mat != MAT_CURIE_FERRO && mat != MAT_HARD_MAGNET) return; // EDDY_COPPER is non-magnetic — handled only in g2p heating path
 
     vec2 pos = positions[p];
     vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
@@ -83,9 +93,19 @@ void main() {
 
     vec4 field = sample_field(pos);
     float hmag = field.z;
-    if (hmag <= 1e-5) return;
-
-    vec2 dir = normalize(field.xy + vec2(1e-6, 0.0));
+    // Don't early-out on hmag==0 anymore — with persistent M state, we still
+    // want stale M to decay toward zero when the field goes away. The dir
+    // below is taken from M_prev if the current field is negligible.
+    vec2 dir;
+    if (hmag > 1e-5) {
+        dir = normalize(field.xy + vec2(1e-6, 0.0));
+    } else {
+        // Use last-known M's direction for relaxation, if any, so the
+        // direction doesn't flip randomly — M magnitude just decays.
+        vec2 prev_m = particle_m_prev[p];
+        float prev_mag = length(prev_m);
+        dir = (prev_mag > 1e-5) ? (prev_m / prev_mag) : vec2(0.0, 1.0);
+    }
     float temp = temperatures[p];
 
     float saturation = 0.0;
@@ -148,6 +168,15 @@ void main() {
         float below = smoothstep(CURIE_FERRO_T_C + 25.0, CURIE_FERRO_T_C - 25.0, temp);
         saturation = 16.0 * below;
         alpha = 3.6 * below;
+    } else if (mat == MAT_HARD_MAGNET) {
+        // Hard permanent magnet: very high saturation, moderate alpha.
+        // The defining feature is NOT the Langevin target but the
+        // extremely slow relaxation rate (set below). Under a strong
+        // applied field the target M saturates; when the field is
+        // removed, M_prev decays so slowly (~0.3/s) that for
+        // human-timescale play the magnet retains its M indefinitely.
+        saturation = 22.0;
+        alpha = 2.5;
     } else {
         // MAT_MAGNETIC_RUBBER
         saturation = 6.2;
@@ -155,8 +184,42 @@ void main() {
     }
 
     float induced = langevin_response(hmag, saturation, alpha);
-    if (induced <= 1e-5) return;
-    vec2 M = dir * (induced * polarity * u_source_scale);
+    // Target magnetization the material WANTS to be at right now given H+T.
+    vec2 M_target = dir * (induced * polarity * u_source_scale);
+
+    // Per-material relaxation rate τ (1/s) controls how quickly persistent M
+    // tracks M_target. Fluids/paramagnets: fast (memoryless, ~30/s). Hard
+    // ferromagnets: extremely slow (~0.3/s), so they retain remanence long
+    // after the applied field is gone.
+    float relax_rate;
+    if (mat == MAT_HARD_MAGNET) {
+        relax_rate = 0.30;                    // ~3s time constant — permanent magnet feel
+    } else if (mat == MAT_CURIE_FERRO) {
+        relax_rate = 2.5;                     // thermal lag on demagnetization is visible but not stuck
+    } else if (mat == MAT_STICKY_FERRO) {
+        relax_rate = 8.0;                     // moderately sticky dynamics
+    } else if (mat == MAT_MAG_SOFT_IRON) {
+        relax_rate = 18.0;                    // classical soft-iron induction — quick but not instant
+    } else if (mat == MAT_MAGNETIC_RUBBER) {
+        relax_rate = 20.0;
+    } else if (mat == MAT_SUPERCONDUCTOR) {
+        relax_rate = 50.0;                    // Meissner response is effectively instantaneous
+    } else {
+        relax_rate = 30.0;                    // ferrofluid / diamagnetic / para mist — memoryless
+    }
+    float blend = 1.0 - exp(-max(relax_rate * u_dt, 0.0));
+    vec2 M_prev = particle_m_prev[p];
+    vec2 M = mix(M_prev, M_target, blend);
+
+    // Commit updated M once per frame (final pass only — induction passes
+    // read-only so multi-iter Jacobi stays self-consistent).
+    if (u_write_state != 0) {
+        particle_m_prev[p] = M;
+    }
+
+    // No-op if M is essentially zero (early-out keeps atomic adds off hot
+    // path when nothing is happening).
+    if (length(M) <= 1e-5) return;
 
     vec2 texel = uv * vec2(u_resolution) - vec2(0.5);
     ivec2 base = ivec2(floor(texel));
@@ -170,7 +233,7 @@ void main() {
     if (mat == MAT_FERRO_FLUID || mat == MAT_HEAVY_FERRO_FLUID ||
         mat == MAT_DIAMAGNETIC_FLUID || mat == MAT_PARA_MIST ||
         mat == MAT_STICKY_FERRO || mat == MAT_SUPERCONDUCTOR ||
-        mat == MAT_CURIE_FERRO) {
+        mat == MAT_CURIE_FERRO || mat == MAT_HARD_MAGNET) {
         atomic_add_occ(base + ivec2(0, 0), (1.0 - f.x) * (1.0 - f.y));
         atomic_add_occ(base + ivec2(1, 0), f.x * (1.0 - f.y));
         atomic_add_occ(base + ivec2(0, 1), (1.0 - f.x) * f.y);
