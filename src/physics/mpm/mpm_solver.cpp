@@ -1,5 +1,6 @@
 #include "physics/mpm/mpm_solver.h"
 #include "physics/magnetic/magnetic_field.h"
+#include "physics/electrostatic/electrostatic_field.h"
 #include "physics/sdf/sdf_field.h"
 #include "physics/eulerian/euler_fluid.h"
 #include "core/log.h"
@@ -54,6 +55,12 @@ vec4 default_thermal_coupling(MPMMaterial material) {
             return vec4(0.02f, 0.92f, 0.78f, 0.03f);
         case MPMMaterial::PHASE_BRITTLE:
             return vec4(0.04f, 0.90f, 0.70f, 0.05f);
+        case MPMMaterial::POSITIVE_ION:
+            return vec4(0.04f, 0.80f, 0.88f, 0.03f);
+        case MPMMaterial::NEGATIVE_ION:
+            return vec4(0.04f, 0.78f, 0.90f, 0.03f);
+        case MPMMaterial::TRIBOELECTRIC:
+            return vec4(0.02f, 0.82f, 0.82f, 0.04f);
         case MPMMaterial::MAILLARD:
             return vec4(0.30f, 0.65f, 0.60f, 0.08f);
         case MPMMaterial::MUSHROOM:
@@ -173,6 +180,9 @@ static vec4 material_spawn_color(MPMMaterial material) {
         case MPMMaterial::HARD_MAGNET:return vec4(0.24f, 0.22f, 0.34f, 1.0f);      // dark magnetite
         case MPMMaterial::SAND_GRANULAR:return vec4(0.88f, 0.78f, 0.50f, 1.0f);    // warm sand
         case MPMMaterial::PHASE_BRITTLE:return vec4(0.82f, 0.86f, 0.92f, 1.0f);    // ceramic pale
+        case MPMMaterial::POSITIVE_ION:return vec4(0.95f, 0.55f, 0.30f, 1.0f);     // warm — like hot plasma
+        case MPMMaterial::NEGATIVE_ION:return vec4(0.40f, 0.60f, 0.95f, 1.0f);     // cool — cold plasma
+        case MPMMaterial::TRIBOELECTRIC:return vec4(0.62f, 0.52f, 0.88f, 1.0f);    // purple-rubber
         case MPMMaterial::MAILLARD:return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM:return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::CRUMB_LOAF:return vec4(0.95f, 0.80f, 0.54f, 1.0f);
@@ -386,6 +396,19 @@ void MPMSolver::spawn_from_positions(ParticleBuffer& particles, const std::vecto
     phase_buf_.upload(phases.data(), count * sizeof(f32), local_offset * sizeof(f32));
     mat_params_buf_.upload(mat_params.data(), count * sizeof(vec4), local_offset * sizeof(vec4));
     thermal_coupling_buf_.upload(thermal_params.data(), count * sizeof(vec4), local_offset * sizeof(vec4));
+
+    // Seed per-particle charge for electrostatic materials. Positive ions
+    // start at +1, negatives at -1, triboelectric at 0 (charges via
+    // surface contact — future extension).
+    if (electrostatic_ && (material == MPMMaterial::POSITIVE_ION ||
+                           material == MPMMaterial::NEGATIVE_ION ||
+                           material == MPMMaterial::TRIBOELECTRIC)) {
+        float charge_val = (material == MPMMaterial::POSITIVE_ION) ? 1.0f
+                         : (material == MPMMaterial::NEGATIVE_ION) ? -1.0f
+                         : 0.0f;
+        std::vector<f32> charges(count, charge_val);
+        electrostatic_->init_charges(offset, charges.data(), count);
+    }
 
     particle_count_ = particles.range(SolverType::MPM).count;
     LOG_INFO("Spawned %u MPM particles (mat=%u, total=%u)", count, static_cast<u32>(material), particle_count_);
@@ -784,6 +807,22 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         g2p_shader_.set_float("u_magnetic_ambient_mag", 0.0f);
         g2p_shader_.set_float("u_magnetic_cursor_strength", 0.0f);
         g2p_shader_.set_int("u_magnetic_scene_active", 0);
+    }
+
+    // Electrostatic coupling — binds E-field texture + per-particle charge
+    // SSBO so Coulomb force F=qE gets applied to charged materials.
+    if (electrostatic_) {
+        g2p_shader_.set_int("u_electric_field_tex", 5);
+        electrostatic_->bind_field_for_read(5);
+        electrostatic_->bind_charge_ssbo(24);
+        const auto& ep = electrostatic_->params();
+        g2p_shader_.set_int("u_use_electrostatics", electrostatic_->active() ? 1 : 0);
+        g2p_shader_.set_vec2("u_electric_world_min", electrostatic_->world_min());
+        g2p_shader_.set_vec2("u_electric_world_max", electrostatic_->world_max());
+        g2p_shader_.set_float("u_electric_force_scale", ep.force_scale);
+    } else {
+        g2p_shader_.set_int("u_use_electrostatics", 0);
+        g2p_shader_.set_float("u_electric_force_scale", 0.0f);
     }
     if (air) {
         glBindTextureUnit(4, air->temp_texture());

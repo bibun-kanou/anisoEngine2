@@ -260,6 +260,9 @@ vec4 default_material_color(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::HARD_MAGNET: return vec4(0.24f, 0.22f, 0.34f, 1.0f);
         case MPMMaterial::SAND_GRANULAR: return vec4(0.88f, 0.78f, 0.50f, 1.0f);
         case MPMMaterial::PHASE_BRITTLE: return vec4(0.82f, 0.86f, 0.92f, 1.0f);
+        case MPMMaterial::POSITIVE_ION: return vec4(0.95f, 0.55f, 0.30f, 1.0f);
+        case MPMMaterial::NEGATIVE_ION: return vec4(0.40f, 0.60f, 0.95f, 1.0f);
+        case MPMMaterial::TRIBOELECTRIC: return vec4(0.62f, 0.52f, 0.88f, 1.0f);
         case MPMMaterial::MAILLARD: return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM: return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::ORTHO_BEND: return vec4(0.78f, 0.56f, 0.26f, 1.0f);
@@ -347,6 +350,9 @@ std::string technique_summary(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::HARD_MAGNET: return "Hard permanent magnet (magnetite-analog) with PERSISTENT magnetization. Expose it to a strong field (hold M near it for a couple seconds) and it locks in a magnetic moment — then it keeps magnetizing scene ferrofluid FOR SECONDS after you let go of M. This is hysteresis: M_prev decays at only ~0.3/s so on human timescales it behaves as a permanent magnet you just made.";
         case MPMMaterial::SAND_GRANULAR: return "True granular sand via Drucker-Prager plasticity (Klar et al. 2016). Return-mapping on the SVD in log-strain space with a 35° friction cone. Forms real angle-of-repose piles, slumps on impact, avalanches when steeper than its critical angle, and — unlike fluids — holds a static heap against gravity.";
         case MPMMaterial::PHASE_BRITTLE: return "Ceramic-like phase-field brittle material. Elastic energy density drives damage growth via dd/dt = k*(psi - psi_c)*(1 - d); stress degrades quadratically (1-d)^2. Clean crack tips, propagating along high-energy paths. Shatters on impact, holds shape under gentle load.";
+        case MPMMaterial::POSITIVE_ION: return "Positive plasma ion cloud (charge q=+1). Accelerates along the electrostatic field E; in an ambient E pointing up, ions stream upward. Repels other positives (scene-generated E from neighboring positives), attracts negatives. Warm orange.";
+        case MPMMaterial::NEGATIVE_ION: return "Negative plasma ion cloud (charge q=-1). Mirror of the positive ion. Streams opposite the E field; pair a positive and negative cloud and watch them fly into each other.";
+        case MPMMaterial::TRIBOELECTRIC: return "Neutral rubber-like solid (charge starts at 0) that will build surface charge via contact friction in a future revision. For now it's a neutral solid baseline for testing the charge infrastructure; set Ambient E and a nonzero charge value via future scripting.";
         case MPMMaterial::MAG_SOFT_IRON: return "Real magnetics benchmark: soft iron body that samples the solved magnetic field and pulls toward stronger |H|^2 regions.";
         case MPMMaterial::MAGNETIC_RUBBER: return "Real magnetics benchmark: compliant magnetizable solid that bends and drifts under the solved magnetic field.";
         case MPMMaterial::MAILLARD: return "Cooking surface model: browning, drying, shell-setting, and steam blistering without a full bread-like rise.";

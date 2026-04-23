@@ -105,6 +105,20 @@ uniform int   u_magnetic_scene_active;
 layout(std430, binding = 22) readonly buffer ParticleMPrev {
     vec2 particle_m_prev[];
 };
+
+// Electrostatic coupling. The E-field texture is written by the
+// ElectrostaticField solver (Poisson + grad(-phi)). Per-particle scalar
+// charge `q` drives F = qE. The separate gate uniform lets MPM run with
+// electrostatics entirely off (0 = skip).
+layout(binding = 5) uniform sampler2D u_electric_field_tex;
+uniform int u_use_electrostatics;
+uniform vec2 u_electric_world_min;
+uniform vec2 u_electric_world_max;
+uniform float u_electric_force_scale;
+
+layout(std430, binding = 24) readonly buffer ParticleCharge {
+    float particle_charge[];
+};
 uniform int   u_keep_colors;
 uniform uint  u_highlight_start; // Global index range to highlight
 uniform uint  u_highlight_end;
@@ -447,6 +461,9 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 74u) return vec4(0.02, 0.80, 0.80, 0.04); // hard magnet: moderate conductivity
     if (mat_type == 75u) return vec4(0.02, 0.92, 0.78, 0.03); // sand: low thermal coupling (dry granular)
     if (mat_type == 76u) return vec4(0.04, 0.90, 0.70, 0.05); // phase-brittle: ceramic-like, modest thermal response
+    if (mat_type == 77u) return vec4(0.04, 0.80, 0.88, 0.03); // positive ion: light gas-like
+    if (mat_type == 78u) return vec4(0.04, 0.78, 0.90, 0.03); // negative ion: similar
+    if (mat_type == 79u) return vec4(0.02, 0.82, 0.82, 0.04); // triboelectric solid
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -504,6 +521,18 @@ vec2 dipole_chain_force(vec2 pos, vec2 M_p, float scale) {
     // moments). The physical force is linear in M, but for a stable sim
     // we want saturation-like cap.
     return grad_mh * (scale / (1.0 + 0.15 * Mm));
+}
+
+// Coulomb force on a charged particle: F = q * E * force_scale.
+// force_scale bundles (1/ε₀-ρ)-analog factors to convert solver E units
+// into m/s² on the particle mass. Returns a cap-free force; the caller
+// clamps into the physically reasonable range.
+vec2 coulomb_force(vec2 pos, float q) {
+    if (u_use_electrostatics == 0 || abs(q) < 1e-5 || u_electric_force_scale <= 1e-5) return vec2(0.0);
+    vec2 uv = (pos - u_electric_world_min) / (u_electric_world_max - u_electric_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec2(0.0);
+    vec4 E = texture(u_electric_field_tex, uv);
+    return q * E.xy * u_electric_force_scale;
 }
 
 vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
@@ -666,6 +695,9 @@ void main() {
     else if (mat_type == 74u) max_speed_cells = 0.55; // hard magnet: solid, heavy
     else if (mat_type == 75u) max_speed_cells = 1.10; // sand: granular flow — grains can move briskly
     else if (mat_type == 76u) max_speed_cells = 0.90; // phase-brittle: solid cap, shatters on overload
+    else if (mat_type == 77u) max_speed_cells = 1.60; // positive ion: light, can be pushed fast by field
+    else if (mat_type == 78u) max_speed_cells = 1.60; // negative ion: same
+    else if (mat_type == 79u) max_speed_cells = 0.70; // triboelectric solid: moderate
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -806,6 +838,26 @@ void main() {
             // Safety clamp: even under extreme moves, limit single-frame
             // heating so we never produce NaN-inducing spikes.
             temperatures[p] = mag_temp + clamp(dQ, 0.0, 60.0);
+        }
+    }
+
+    // Electrostatic Coulomb force. F = qE, applied to charged particle
+    // materials only (POSITIVE_ION=77, NEGATIVE_ION=78, TRIBOELECTRIC=79).
+    // Keep in sync with the charge_rasterize.comp material gate. The per-
+    // particle q lives in particle_charge[p]; sign of q flips which way
+    // the field pulls the particle.
+    if (u_use_electrostatics != 0) {
+        bool is_charged_mat = (mat_type == 77u || mat_type == 78u || mat_type == 79u);
+        if (is_charged_mat) {
+            float q = particle_charge[p];
+            vec2 f_coulomb = coulomb_force(pos, q);
+            // Per-frame cap on Coulomb acceleration so clustering into a
+            // single super-charged blob can't explode the integrator.
+            // 28 m/s^2 ≈ 2.9g — comparable to heavy-ferro max_mag_force.
+            float fc_mag = length(f_coulomb);
+            const float F_COULOMB_MAX = 28.0;
+            if (fc_mag > F_COULOMB_MAX) f_coulomb *= F_COULOMB_MAX / fc_mag;
+            new_vel += f_coulomb * u_dt;
         }
     }
 
@@ -1043,7 +1095,8 @@ void main() {
                          mat_type == 66u || mat_type == 67u || mat_type == 68u ||
                          mat_type == 69u || mat_type == 70u || mat_type == 71u ||
                          mat_type == 72u || mat_type == 73u || mat_type == 74u ||
-                         mat_type == 75u || mat_type == 76u);
+                         mat_type == 75u || mat_type == 76u || mat_type == 77u ||
+                         mat_type == 78u || mat_type == 79u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||

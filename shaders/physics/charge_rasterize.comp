@@ -1,0 +1,59 @@
+#version 450 core
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PositionBuffer { vec2 positions[]; };
+layout(std430, binding = 7) readonly buffer MatIDBuffer { uint material_ids[]; };
+
+layout(std430, binding = 23) coherent buffer ParticleChargeAccum { int accum_rho[]; };
+layout(std430, binding = 24) readonly buffer ParticleCharge { float particle_charge[]; };
+
+uniform uint u_offset;
+uniform uint u_count;
+uniform ivec2 u_resolution;
+uniform vec2 u_world_min;
+uniform vec2 u_world_max;
+
+// Charged material gate — keep in sync with the list in mpm_g2p.comp's
+// Coulomb force branch. Both sides must agree on which materials carry a
+// nonzero charge for the rasterization + force pipeline to stay balanced.
+const uint MAT_POSITIVE_ION   = 77u;
+const uint MAT_NEGATIVE_ION   = 78u;
+const uint MAT_TRIBOELECTRIC  = 79u;
+
+const float FIXED_SCALE = 256.0;
+
+bool is_charged(uint mat) {
+    return mat == MAT_POSITIVE_ION || mat == MAT_NEGATIVE_ION || mat == MAT_TRIBOELECTRIC;
+}
+
+void atomic_add_sample(ivec2 pixel, float rho, float weight) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= u_resolution.x || pixel.y >= u_resolution.y) return;
+    uint cell = uint(pixel.y * u_resolution.x + pixel.x);
+    int add = int(round(rho * weight * FIXED_SCALE));
+    if (add != 0) atomicAdd(accum_rho[cell], add);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    uint mat = material_ids[p];
+    if (!is_charged(mat)) return;
+
+    float q = particle_charge[p];
+    if (abs(q) <= 1e-5) return;
+
+    vec2 pos = positions[p];
+    vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return;
+
+    vec2 texel = uv * vec2(u_resolution) - vec2(0.5);
+    ivec2 base = ivec2(floor(texel));
+    vec2 f = fract(texel);
+    atomic_add_sample(base + ivec2(0, 0), q, (1.0 - f.x) * (1.0 - f.y));
+    atomic_add_sample(base + ivec2(1, 0), q, f.x * (1.0 - f.y));
+    atomic_add_sample(base + ivec2(0, 1), q, (1.0 - f.x) * f.y);
+    atomic_add_sample(base + ivec2(1, 1), q, f.x * f.y);
+}

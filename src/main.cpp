@@ -12,6 +12,7 @@
 #include "physics/mpm/mpm_solver.h"
 #include "physics/sdf/sdf_field.h"
 #include "physics/magnetic/magnetic_field.h"
+#include "physics/electrostatic/electrostatic_field.h"
 #include "physics/eulerian/euler_fluid.h"
 #include "render/particle_renderer.h"
 #include "render/sdf_renderer.h"
@@ -38,6 +39,7 @@ static ng::MPMSolver      g_mpm;
 static ng::UniformGrid    g_mpm_grid;
 static ng::SDFField       g_sdf;
 static ng::MagneticField  g_magnetic;
+static ng::ElectrostaticField g_electrostatic;
 static ng::EulerianFluid  g_air;
 static ng::ParticleRenderer g_particle_renderer;
 static ng::SDFRenderer    g_sdf_renderer;
@@ -281,6 +283,11 @@ static float g_mag_field_exposure = 1.0f;
 static bool  g_ambient_field_enabled = false;
 static float g_ambient_field_strength = 4.0f;
 static float g_ambient_field_angle_deg = 90.0f;
+// Electrostatic ambient E-field. Same conventions as the magnetic one.
+// Drives charged particles (MAT_POSITIVE_ION / NEGATIVE_ION / TRIBOELECTRIC).
+static bool  g_ambient_E_enabled = false;
+static float g_ambient_E_strength = 2.0f;
+static float g_ambient_E_angle_deg = 90.0f;
 static bool g_show_pipeline = false;
 static bool g_show_pipeline_prev = false;
 static bool g_show_interaction_window = false;
@@ -6844,6 +6851,22 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
             g_magnetic.params().ambient_H = ng::vec2(0.0f, 0.0f);
         }
 
+        // Ambient electrostatic field — analogous to ambient_H but for
+        // charged particle materials (POSITIVE_ION / NEGATIVE_ION /
+        // TRIBOELECTRIC). Drives them along E; repulsion between
+        // like-charges emerges automatically via the solver.
+        ImGui::Checkbox("Ambient E-field", &g_ambient_E_enabled);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adds a uniform background electric field E across the whole simulation. Drives charged particle materials (positive ion, negative ion). Direction chosen by angle; positive charges flow along E, negatives against. Analogous to Ambient Field but for charge instead of magnetism.");
+        if (g_ambient_E_enabled) {
+            ImGui::SliderFloat("E Strength", &g_ambient_E_strength, 0.1f, 40.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("E Angle", &g_ambient_E_angle_deg, 0.0f, 360.0f, "%.0f deg");
+            float rad = g_ambient_E_angle_deg * 3.14159265358979f / 180.0f;
+            g_electrostatic.params().ambient_E = ng::vec2(std::cos(rad), std::sin(rad)) * g_ambient_E_strength;
+            g_electrostatic.params().debug_force_active = true;
+        } else {
+            g_electrostatic.params().ambient_E = ng::vec2(0.0f, 0.0f);
+        }
+
         // Raw solver-strength knobs. These affect EVERY magnetic source
         // (cursor, scene magnets, ambient, ferro demag feedback) since
         // they're global multipliers / iteration counts inside the solver
@@ -7039,6 +7062,16 @@ static void init_systems() {
     mc.world_min = sc.world_min;
     mc.world_max = sc.world_max;
     g_magnetic.init(mc);
+
+    // Electrostatic solver shares the magnetic grid resolution + bounds.
+    // Poisson machinery is effectively the same; only the source and
+    // per-particle state differ.
+    ng::ElectrostaticField::Config ec;
+    ec.resolution = mc.resolution;
+    ec.world_min = mc.world_min;
+    ec.world_max = mc.world_max;
+    g_electrostatic.init(ec);
+    g_mpm.set_electrostatic(&g_electrostatic);
 
     ng::UniformGrid::Config gc;
     gc.world_min = scene_cfg.grid_world_min;
@@ -8370,6 +8403,7 @@ int main(int, char**) {
 
         // --- Physics ---
         g_magnetic.step(g_sdf, &g_particles);
+        g_electrostatic.step(g_sdf, &g_particles);
         if (!g_paused) {
             // Auto-enable thermal when any MPM particles exist (for heat propagation)
             if (g_mpm.particle_count() > 0 && !mp.enable_thermal) {

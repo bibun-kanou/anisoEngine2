@@ -11,6 +11,7 @@ namespace ng {
 
 class SDFField;
 class MagneticField;
+class ElectrostaticField;
 class EulerianFluid;
 
 // Material type IDs (must match shader defines)
@@ -92,6 +93,9 @@ enum class MPMMaterial : u32 {
     HARD_MAGNET = 74,
     SAND_GRANULAR = 75,
     PHASE_BRITTLE = 76,
+    POSITIVE_ION = 77,
+    NEGATIVE_ION = 78,
+    TRIBOELECTRIC = 79,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);
@@ -215,6 +219,12 @@ public:
     const GPUBuffer& spring_anchor_buf() const { return spring_anchor_buf_; }
     const GPUBuffer& spring_weight_buf() const { return spring_weight_buf_; }
 
+    // Electrostatic coupling — set by main.cpp before step() so the g2p
+    // pass can bind the E-field texture + per-particle charge SSBO.
+    // Non-const pointer because spawn_from_positions needs to upload
+    // initial per-particle charges. Null = no electrostatics.
+    void set_electrostatic(ElectrostaticField* e) { electrostatic_ = e; }
+
 private:
     void spawn_from_positions(ParticleBuffer& particles, const std::vector<vec2>& positions,
                               const std::vector<f32>& shell_seeds, f32 mass,
@@ -230,6 +240,8 @@ private:
 
     MPMParams params_;
     u32 particle_count_ = 0;
+
+    ElectrostaticField* electrostatic_ = nullptr;
 
     GPUBuffer jp_buf_;
     GPUBuffer fiber_buf_;

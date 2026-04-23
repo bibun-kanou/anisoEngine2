@@ -126,6 +126,9 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_HARD_MAGNET 74u
 #define MAT_SAND_GRANULAR 75u
 #define MAT_PHASE_BRITTLE 76u
+#define MAT_POSITIVE_ION 77u
+#define MAT_NEGATIVE_ION 78u
+#define MAT_TRIBOELECTRIC 79u
 
 #include "common/mpm_utils.glsl"
 
@@ -350,6 +353,9 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_HARD_MAGNET) return vec4(0.02, 0.80, 0.80, 0.04);
     if (mat_type == MAT_SAND_GRANULAR) return vec4(0.02, 0.92, 0.78, 0.03);
     if (mat_type == MAT_PHASE_BRITTLE) return vec4(0.04, 0.90, 0.70, 0.05);
+    if (mat_type == MAT_POSITIVE_ION) return vec4(0.04, 0.80, 0.88, 0.03);
+    if (mat_type == MAT_NEGATIVE_ION) return vec4(0.04, 0.78, 0.90, 0.03);
+    if (mat_type == MAT_TRIBOELECTRIC) return vec4(0.02, 0.82, 0.82, 0.04);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -441,7 +447,8 @@ void main() {
                          mat_type == MAT_CELL_SHEET || mat_type == MAT_ASH_REGROWTH ||
                          mat_type == MAT_SUPERCONDUCTOR || mat_type == MAT_CURIE_FERRO ||
                          mat_type == MAT_EDDY_COPPER || mat_type == MAT_HARD_MAGNET ||
-                         mat_type == MAT_SAND_GRANULAR || mat_type == MAT_PHASE_BRITTLE);
+                         mat_type == MAT_SAND_GRANULAR || mat_type == MAT_PHASE_BRITTLE ||
+                         mat_type == MAT_TRIBOELECTRIC);
     float sig_min = is_solid_mat ? 0.5 : 0.1;  // Solids: max 50% compression
     float sig_max = is_solid_mat ? 3.0 : 8.0;
     svd.sigma = clamp(svd.sigma, vec2(sig_min), vec2(sig_max));
@@ -479,7 +486,12 @@ void main() {
     mat2 stress;
     mat2 R = svd.U * transpose(svd.V);
 
-    if (mat_type == MAT_FLUID) {
+    if (mat_type == MAT_FLUID ||
+        mat_type == MAT_POSITIVE_ION || mat_type == MAT_NEGATIVE_ION) {
+        // Ions: light fluid constitutive (same as MAT_FLUID). Their
+        // distinguishing behavior is the Coulomb force applied in g2p;
+        // the EOS just keeps them behaving like a mobile compressible
+        // gas/liquid so the field can shape them.
         F = mat2(sqrt(max(J, 0.01)));
         J = max(J, 0.01);
         stress = mat2(lambda * J * (J - 1.0));
@@ -3790,6 +3802,7 @@ void main() {
     if (mat_type == MAT_FERRO_FLUID || mat_type == MAT_HEAVY_FERRO_FLUID ||
         mat_type == MAT_DIAMAGNETIC_FLUID || mat_type == MAT_PARA_MIST ||
         mat_type == MAT_STICKY_FERRO ||
+        mat_type == MAT_POSITIVE_ION || mat_type == MAT_NEGATIVE_ION ||
         mat_type == MAT_FLUID || mat_type == MAT_FLAMMABLE_FLUID) {
         // Fluid EOS ceiling: 40x E. For ferrofluid E=4200 → 168000 Pa,
         // comfortably above the max Tait pressure at the J_safe floor
