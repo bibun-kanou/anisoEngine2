@@ -87,8 +87,15 @@ void main() {
     // sensitivity that a modest exposure multiplier can push them visible.
     float mag_norm = 1.0 - exp(-mag * 0.5);
 
-    float lane = dot(world - u_brush_pos, tangent) * 13.0;
-    float along = dot(world - u_brush_pos, dir) * 9.0;
+    // Streak/ripple phase reference. In brush mode the pattern naturally
+    // radiates from the mouse — using u_brush_pos makes the streaks look
+    // anchored to the cursor. In real-field mode there is no cursor source,
+    // so we must use a fixed origin (world-zero), otherwise the animated
+    // pattern appears to slide with the mouse even though the underlying
+    // field is static.
+    vec2 phase_origin = (u_use_real_field != 0) ? vec2(0.0) : u_brush_pos;
+    float lane = dot(world - phase_origin, tangent) * 13.0;
+    float along = dot(world - phase_origin, dir) * 9.0;
     float streak = 0.5 + 0.5 * sin(lane + along * 0.25 - u_time * 1.3);
     streak = pow(streak, 2.8);
     float ripple = 0.5 + 0.5 * cos(along - u_time * 0.8 + mag * 0.05);
