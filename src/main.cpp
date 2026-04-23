@@ -134,7 +134,11 @@ enum class ProjectilePreset : int {
     // Launcher2 hybrid weapons (composed from existing primitives)
     ROCKET_PAYLOAD = 57,
     ROCKET_SIDE_CLAYMORE = 58,
-    CLAYMORE_CLUSTER = 59
+    CLAYMORE_CLUSTER = 59,
+    // Contact-triggered launcher2 weapons (use impact_rupture)
+    LATERAL_CONTACT_CHARGE = 60,
+    GRAVITY_PENETRATOR = 61,
+    CONCUSSION_CHARGE = 62
 };
 
 enum class ProjectileDragMode : int {
@@ -192,9 +196,13 @@ struct PressureVesselRecord {
     ng::f32 rupture_age = -1.0f;
     // Impact-triggered rupture: when true, a sudden drop in avg shell speed
     // (collision) forces a rupture even if pressure is below threshold. Used by
-    // ROCKET_PAYLOAD so the rocket propels through the air inertly and only
-    // detonates when it hits something.
+    // ROCKET_PAYLOAD and the contact-triggered bomb family so they detonate on
+    // contact instead of mid-flight.
     bool impact_rupture = false;
+    // When true AND impact_rupture fires, preferred_axis is snapped to gravity
+    // direction (0, -1) so the resulting blast/payload drives downward through
+    // the struck surface regardless of incoming flight angle.
+    bool penetrate_on_impact = false;
     ng::f32 prev_shell_speed = 0.0f;
 };
 
@@ -936,7 +944,16 @@ struct ProjectilePresetDesc {
         //                  (small FIRECRACKER bomblets) instead of solid beads.
         ROCKET_PAYLOAD = 25,
         ROCKET_SIDE_CLAYMORE = 26,
-        CLAYMORE_CLUSTER = 27
+        CLAYMORE_CLUSTER = 27,
+        // Contact-triggered variants. All use impact_rupture.
+        // LATERAL_CONTACT     = on impact, fragments fly perpendicular to flight (side blast).
+        // PENETRATING_DOWN    = on impact, preferred axis snaps to gravity so the burst
+        //                       drives downward through the struck surface.
+        // CONCUSSION          = on impact, big air pressure pulse with intentionally
+        //                       low heat — a "stun" blast instead of an incendiary.
+        LATERAL_CONTACT = 28,
+        PENETRATING_DOWN = 29,
+        CONCUSSION = 30
     };
 
     Kind kind;
@@ -951,23 +968,25 @@ struct ProjectilePresetDesc {
 
 static ProjectilePreset active_projectile_preset_id() {
     if (g_mode == InteractMode::LAUNCHER2) {
-        // Six-weapon palette for the key-6 launcher. TIME_BOMB maps to
-        // REAL_TIME_BOMB (pressure-vessel with airtight shell), not the older
-        // TIME_BOMB kind — the latter's delay was unreliable. The hybrid entries
-        // (ROCKET_PAYLOAD, ROCKET_SIDE_CLAYMORE, CLAYMORE_CLUSTER) are new
-        // compositions of the primitives above.
-        static constexpr ProjectilePreset kLauncher2[6] = {
+        // Nine-weapon palette for the key-6 launcher. Rows 4-6 are hybrid
+        // compositions (rocket+payload, rocket+side-claymores, claymore+cluster),
+        // rows 7-9 are contact-triggered variants that detonate only on impact
+        // (lateral burst, gravity-direction penetrator, concussion wave).
+        static constexpr ProjectilePreset kLauncher2[9] = {
             ProjectilePreset::REAL_TIME_BOMB,
             ProjectilePreset::ROCKET,
             ProjectilePreset::CLAYMORE,
             ProjectilePreset::ROCKET_PAYLOAD,
             ProjectilePreset::ROCKET_SIDE_CLAYMORE,
-            ProjectilePreset::CLAYMORE_CLUSTER
+            ProjectilePreset::CLAYMORE_CLUSTER,
+            ProjectilePreset::LATERAL_CONTACT_CHARGE,
+            ProjectilePreset::GRAVITY_PENETRATOR,
+            ProjectilePreset::CONCUSSION_CHARGE
         };
-        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 5)];
+        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 8)];
     }
     return static_cast<ProjectilePreset>(
-        glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::CLAYMORE_CLUSTER)));
+        glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::CONCUSSION_CHARGE)));
 }
 
 static ProjectilePresetDesc current_projectile_preset() {
@@ -1150,6 +1169,15 @@ static ProjectilePresetDesc current_projectile_preset() {
     case ProjectilePreset::CLAYMORE_CLUSTER:
         return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER, ng::MPMMaterial::SEALED_CHARGE, 78000.0f, 4.6f * weight_scale, 300.0f, ng::vec4(1.72f, 1.92f, 0.62f, 0.03f),
                  "Claymore with cluster payload: instead of solid beads, the claymore front launches a spray of small secondary FIRECRACKER bomblets that each cook off shortly after being flung out." };
+    case ProjectilePreset::LATERAL_CONTACT_CHARGE:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::LATERAL_CONTACT, ng::MPMMaterial::SEALED_CHARGE, 80000.0f, 4.4f * weight_scale, 300.0f, ng::vec4(1.52f, 1.80f, 0.62f, 0.02f),
+                 "Side-burst contact charge: inert in flight, detonates on impact, sprays fragments perpendicular to the flight axis. Good for corridor-clearing hits on walls." };
+    case ProjectilePreset::GRAVITY_PENETRATOR:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::PENETRATING_DOWN, ng::MPMMaterial::SEALED_CHARGE, 92000.0f, 5.4f * weight_scale, 300.0f, ng::vec4(1.52f, 1.72f, 0.64f, 0.01f),
+                 "Gravity penetrator: inert in flight, on contact the burst + payload snap downward (gravity direction) regardless of incoming angle. For driving shrapnel through a floor or roof you're sitting on top of." };
+    case ProjectilePreset::CONCUSSION_CHARGE:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::CONCUSSION, ng::MPMMaterial::SEALED_CHARGE, 72000.0f, 4.2f * weight_scale, 300.0f, ng::vec4(1.14f, 0.30f, 0.90f, 0.06f),
+                 "Concussion charge: high-pressure shockwave with deliberately low heat. Pushes things hard without setting them on fire or leaving a persistent hot zone. Detonates on contact." };
     case ProjectilePreset::STEEL:
     default:
         return { ProjectilePresetDesc::Kind::SINGLE, ProjectilePresetDesc::VesselMode::ROUND, ng::MPMMaterial::THERMO_METAL, g_ball_stiffness, 7.5f * weight_scale, 300.0f, ng::vec4(1.0f),
@@ -1858,6 +1886,16 @@ static void update_pressure_vessels(ng::f32 dt) {
         if (vessel.impact_rupture && !vessel.ruptured &&
             vessel.prev_shell_speed > 4.0f &&
             curr_shell_speed < 0.45f * vessel.prev_shell_speed) {
+            // Snap preferred_axis to gravity direction before any downstream code
+            // reads it this frame. This is what makes the "penetrating" variant
+            // redirect its burst + payload downward instead of along the original
+            // flight axis. Must happen before preferred_axis is used below.
+            if (vessel.penetrate_on_impact) {
+                vessel.preferred_axis = ng::vec2(0.0f, -1.0f);
+                preferred_axis = ng::vec2(0.0f, -1.0f);
+                breach_dir = ng::vec2(0.0f, -1.0f);
+                side_axis = ng::vec2(1.0f, 0.0f);
+            }
             vessel.ruptured = true;
             vessel.rupture_age = 0.0f;
             just_ruptured = true;
@@ -2168,7 +2206,10 @@ static void fire_projectile(ng::vec2 origin) {
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::SPIRAL ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE ||
-                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER)) {
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::LATERAL_CONTACT ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CONCUSSION)) {
             collect_layered_bomb_layers(origin, g_ball_radius, launch_angle, shape, spacing,
                                         core_positions, core_shell, fuse_positions, fuse_shell,
                                         shell_positions, shell_shell, armor_positions, armor_shell);
@@ -2184,10 +2225,11 @@ static void fire_projectile(ng::vec2 origin) {
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::APHE ||
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::TANDEM ||
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD ||
-                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE) {
-            // ROCKET_PAYLOAD / ROCKET_SIDE_CLAYMORE both carry a claymore-style shrapnel
-            // pack; the rocket preset setup below decides whether it launches forward
-            // on rupture or sideways mid-flight.
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE ||
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::LATERAL_CONTACT ||
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN) {
+            // Claymore-style shrapnel pack. Direction is decided later by the vessel
+            // setup (forward / lateral / gravity-snap).
             collect_claymore_payload(origin, g_ball_radius, launch_angle, shape, spacing,
                                      payload_positions, payload_shell);
         } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLUSTER ||
@@ -2959,6 +3001,105 @@ static void fire_projectile(ng::vec2 origin) {
                 payload_density = 1.9f * glm::max(g_ball_weight, 0.5f) / 6.0f;
                 payload_initial_temp = g_projectile_auto_arm ? 332.0f : 300.0f;
                 payload_thermal = ng::vec4(1.28f, 1.44f, 0.76f, 0.06f);
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::LATERAL_CONTACT) {
+                // Impact-triggered side-burst charge. Body is inert in flight, then
+                // on contact the shell + core + payload all fling sideways
+                // (perpendicular to the flight axis) via side_blast_scale and a
+                // radial payload. Good for wall/ceiling clearing.
+                shell_stiffness = 116000.0f;
+                shell_density *= 0.98f;
+                fuse_stiffness = 22000.0f;
+                fuse_density *= 0.88f;
+                core_stiffness = 19800.0f;
+                core_density *= 1.10f;
+                fuse_initial_temp = 470.0f;
+                core_initial_temp = 290.0f;
+                core_thermal = ng::vec4(0.60f, 1.20f, 0.72f, 0.02f);
+                vessel.gas_mass = 0.06f;
+                vessel.axis_bias = 1.0f;
+                vessel.gas_source_scale = 0.30f;
+                vessel.rupture_scale = 5.00f;
+                vessel.burst_scale = 0.70f;
+                vessel.shell_push_scale = 0.40f;
+                vessel.core_push_scale = 0.60f;
+                vessel.leak_scale = 1.80f;
+                // Lateral dominance: side_blast_scale high, normal forward payload push low.
+                vessel.side_blast_scale = 3.40f;
+                vessel.payload_push_scale = 3.60f;
+                vessel.payload_cone = 0.02f;         // near-zero cone → radial spread
+                vessel.payload_directionality = 0.0f; // payload flies radially, not forward
+                vessel.plume_push_scale = 1.20f;
+                vessel.plume_heat_scale = 0.70f;
+                vessel.impact_rupture = true;
+                payload_material = ng::MPMMaterial::THERMO_METAL;
+                payload_stiffness = 128000.0f;
+                payload_density = 5.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
+                payload_initial_temp = 300.0f;
+                payload_thermal = ng::vec4(0.14f, 0.22f, 1.00f, 0.00f);
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN) {
+                // Impact-triggered gravity-direction penetrator. On contact the
+                // preferred_axis snaps to (0,-1) so the burst and payload drive
+                // downward through whatever was struck. Denser body (5.4x) to
+                // punch into the surface with some momentum before detonating.
+                shell_stiffness = 148000.0f;
+                shell_density *= 1.14f;
+                fuse_stiffness = 24000.0f;
+                fuse_density *= 0.96f;
+                core_stiffness = 22000.0f;
+                core_density *= 1.24f;
+                fuse_initial_temp = 500.0f;
+                core_initial_temp = 290.0f;
+                core_thermal = ng::vec4(1.10f, 1.40f, 0.68f, 0.00f);
+                vessel.gas_mass = 0.06f;
+                vessel.axis_bias = 1.0f;       // forward-biased until the impact snap happens
+                vessel.gas_source_scale = 0.34f;
+                vessel.rupture_scale = 5.20f;
+                vessel.burst_scale = 0.80f;
+                vessel.shell_push_scale = 0.72f;
+                vessel.core_push_scale = 1.05f;
+                vessel.leak_scale = 1.70f;
+                vessel.payload_push_scale = 5.80f;
+                vessel.payload_cone = 0.76f;         // fairly tight cone along the (snapped) down axis
+                vessel.payload_directionality = 1.0f;
+                vessel.plume_push_scale = 1.40f;
+                vessel.plume_heat_scale = 0.90f;
+                vessel.impact_rupture = true;
+                vessel.penetrate_on_impact = true;
+                payload_material = ng::MPMMaterial::THERMO_METAL;
+                payload_stiffness = 162000.0f;
+                payload_density = 7.4f * glm::max(g_ball_weight, 0.5f) / 6.0f;
+                payload_initial_temp = 300.0f;
+                payload_thermal = ng::vec4(0.12f, 0.20f, 1.02f, 0.00f);
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CONCUSSION) {
+                // Impact-triggered concussion charge. Push-heavy but heat-light:
+                // plume_push / blast_push are amplified, plume_heat / blast_heat
+                // are knocked down so the blast moves everything without cooking
+                // it. No payload — the air pressure wave is the whole effect.
+                shell_stiffness = 104000.0f;
+                shell_density *= 1.02f;
+                fuse_stiffness = 20000.0f;
+                fuse_density *= 0.88f;
+                core_stiffness = 18800.0f;
+                core_density *= 1.06f;
+                fuse_initial_temp = 440.0f;
+                core_initial_temp = 290.0f;
+                core_thermal = ng::vec4(0.14f, 0.36f, 1.02f, 0.02f);  // low outgas, low heat release
+                shell_thermal = ng::vec4(0.00f, 0.06f, 1.12f, 0.00f);
+                fuse_thermal = ng::vec4(0.04f, 0.22f, 0.98f, 0.00f);
+                vessel.gas_mass = 0.12f;
+                vessel.axis_bias = 0.4f;           // blast is more radial than forward
+                vessel.gas_source_scale = 0.70f;    // still enough gas to make pressure matter at impact
+                vessel.rupture_scale = 4.80f;
+                vessel.burst_scale = 1.60f;         // big burst (pressure wave)
+                vessel.shell_push_scale = 1.10f;
+                vessel.core_push_scale = 0.60f;
+                vessel.leak_scale = 1.40f;
+                vessel.plume_push_scale = 2.60f;    // big push
+                vessel.plume_heat_scale = 0.18f;    // almost no heat
+                vessel.plume_radius_scale = 1.45f;  // wide pressure wave
+                vessel.blast_push_scale = 2.80f;    // big blast impulse
+                vessel.blast_heat_scale = 0.14f;    // almost no blast heat
+                vessel.impact_rupture = true;
             }
 
             switch (preset_id) {
@@ -4817,9 +4958,12 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
                 "Claymore",
                 "Rocket + Payload",
                 "Rocket + Side Claymores",
-                "Claymore + Cluster"
+                "Claymore + Cluster",
+                "Side Burst (Contact)",
+                "Gravity Penetrator (Contact)",
+                "Concussion Charge (Contact)"
             };
-            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 6);
+            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 9);
             ProjectilePresetDesc ui_preset = current_projectile_preset();
             if (ui_preset.kind != ProjectilePresetDesc::Kind::SINGLE) {
                 ImGui::Checkbox("Auto-Arm on Launch", &g_projectile_auto_arm);
