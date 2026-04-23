@@ -194,16 +194,41 @@ struct PressureVesselRecord {
     bool auto_arm = true;
     bool ruptured = false;
     ng::f32 rupture_age = -1.0f;
-    // Impact-triggered rupture: when true, a sudden drop in avg shell speed
-    // (collision) forces a rupture even if pressure is below threshold. Used by
-    // ROCKET_PAYLOAD and the contact-triggered bomb family so they detonate on
-    // contact instead of mid-flight.
+    // Impact-triggered rupture: when true, any of the contact sensors below can
+    // fire a rupture regardless of pressure. Used by the contact-triggered bomb
+    // family so they only detonate on contact, not mid-flight.
     bool impact_rupture = false;
-    // When true AND impact_rupture fires, preferred_axis is snapped to gravity
-    // direction (0, -1) so the resulting blast/payload drives downward through
-    // the struck surface regardless of incoming flight angle.
+    // When true AND a sensor fires, preferred_axis is snapped to gravity
+    // direction (0, -1) so the blast/payload drives downward through the
+    // struck surface regardless of incoming flight angle. Applied at the
+    // rupture frame, not the trigger frame, so the fuse delay still ticks.
     bool penetrate_on_impact = false;
+
+    // Sensors. Filled in by the vessel config; only active when impact_rupture
+    // is also true.
+    //  - Velocity-drop sensor: prev speed > 4 m/s + curr < 45% prev means a
+    //    hard, fast collision. Fires in one frame on hard hits. Zero tuning.
+    //  - Crack-rate sensor: shell_crack accumulates from both GPU-side stress
+    //    (impact crushing of shell particles) and C++-side pressure cracking.
+    //    A sudden rise in crack_avg distinguishes "just smashed into something"
+    //    from "steady pressure build-up". Rate is per second; cruise pressure
+    //    alone gives ~0.3/s, so thresholds around 1.5/s reliably separate them.
+    ng::f32 impact_crack_rate_threshold = 0.0f;
+
+    // Delay fuse between any sensor firing and the actual rupture.
+    //  - 0.0 s = instant (old behavior).
+    //  - 0.02-0.08 s = "contact fuse" — fast but lets a shell hit dig in by one
+    //    particle width before the blast goes off.
+    //  - 0.1-0.3 s = heavier "delay fuse" — lets a gravity penetrator actually
+    //    bury into the surface before going off.
+    bool triggered = false;
+    ng::f32 trigger_age = 0.0f;
+    ng::f32 trigger_to_rupture_delay = 0.0f;
+
+    // Previous-frame cache for rate sensors. Updated at the end of each vessel
+    // update so the next frame can compute a derivative.
     ng::f32 prev_shell_speed = 0.0f;
+    ng::f32 prev_crack_avg = 0.0f;
 };
 
 enum class HoverKind { NONE, BATCH, SDF };
@@ -1873,38 +1898,59 @@ static void update_pressure_vessels(ng::f32 dt) {
         ng::f32 rupture_threshold = (3.4f + shell_integrity * 2.8f - shell_hot * 0.8f) * vessel.rupture_scale;
         bool just_ruptured = false;
 
-        // Impact detection: avg shell speed dropping sharply in one frame means the
-        // rocket has smashed into something. This is how ROCKET_PAYLOAD (and any
-        // future impact-triggered vessel) detonates on contact instead of cooking
-        // off in mid-air. Require that the vessel was actually moving (>4 m/s avg)
-        // so brand-new spawns and slow drifts don't false-trigger.
+        // ------------------------------------------------------------------
+        // Contact sensors + delay fuse. Reference map of bomb "blocks" used
+        // here: B3 = crack-rate sensor, B4 = velocity-drop sensor, B5 = delay
+        // fuse. Any sensor flips vessel.triggered, then the delay fuse ticks
+        // up to trigger_to_rupture_delay before the actual rupture fires.
+        // ------------------------------------------------------------------
         ng::f32 curr_shell_speed = 0.0f;
         if (!shell_vel.empty()) {
             for (const ng::vec2& v : shell_vel) curr_shell_speed += glm::length(v);
             curr_shell_speed /= static_cast<ng::f32>(shell_vel.size());
         }
-        if (vessel.impact_rupture && !vessel.ruptured &&
-            vessel.prev_shell_speed > 4.0f &&
-            curr_shell_speed < 0.45f * vessel.prev_shell_speed) {
-            // Snap preferred_axis to gravity direction before any downstream code
-            // reads it this frame. This is what makes the "penetrating" variant
-            // redirect its burst + payload downward instead of along the original
-            // flight axis. Must happen before preferred_axis is used below.
-            if (vessel.penetrate_on_impact) {
-                vessel.preferred_axis = ng::vec2(0.0f, -1.0f);
-                preferred_axis = ng::vec2(0.0f, -1.0f);
-                breach_dir = ng::vec2(0.0f, -1.0f);
-                side_axis = ng::vec2(1.0f, 0.0f);
-            }
-            vessel.ruptured = true;
-            vessel.rupture_age = 0.0f;
-            just_ruptured = true;
-            // Give the impact rupture a healthy burst energy so the payload
-            // actually gets flung. Use vessel.pressure at impact as a mild
-            // enhancer (moving rocket + some pressure = bigger boom).
-            vessel.burst_energy += (3.6f + vessel.pressure * 0.8f) * glm::max(vessel.burst_scale, 0.50f);
+        // B4: sharp velocity drop. Only valid after the vessel was actually
+        // flying (prev > 4 m/s) to avoid false positives from spawn frames.
+        bool vel_sensor = (vessel.prev_shell_speed > 4.0f &&
+                           curr_shell_speed < 0.45f * vessel.prev_shell_speed);
+        // B3: crack-rate sensor. Skip the first frame (prev_crack_avg not
+        // initialized yet) to avoid a false spike from the crack seed bias.
+        ng::f32 crack_rate = 0.0f;
+        if (vessel.age > 0.02f) {
+            crack_rate = (crack_avg - vessel.prev_crack_avg) / glm::max(dt, 1e-4f);
+        }
+        bool crack_sensor = (vessel.impact_crack_rate_threshold > 1e-4f &&
+                             crack_rate > vessel.impact_crack_rate_threshold);
+
+        if (vessel.impact_rupture && !vessel.ruptured && !vessel.triggered &&
+            (vel_sensor || crack_sensor)) {
+            vessel.triggered = true;
+            vessel.trigger_age = 0.0f;
         }
         vessel.prev_shell_speed = curr_shell_speed;
+        vessel.prev_crack_avg = crack_avg;
+
+        // B5: delay fuse. Ticks once triggered. When it reaches the configured
+        // delay, the vessel actually ruptures. Axis-snap for PENETRATING_DOWN
+        // happens here (at rupture frame) so the fuse delay is spent falling
+        // along the flight axis — which is what lets a penetrator bury a bit
+        // before the downward burst fires.
+        if (vessel.triggered && !vessel.ruptured) {
+            vessel.trigger_age += dt;
+            if (vessel.trigger_age >= vessel.trigger_to_rupture_delay) {
+                if (vessel.penetrate_on_impact) {
+                    vessel.preferred_axis = ng::vec2(0.0f, -1.0f);
+                    preferred_axis = ng::vec2(0.0f, -1.0f);
+                    breach_dir = ng::vec2(0.0f, -1.0f);
+                    side_axis = ng::vec2(1.0f, 0.0f);
+                }
+                vessel.ruptured = true;
+                vessel.rupture_age = 0.0f;
+                just_ruptured = true;
+                vessel.burst_energy += (3.6f + vessel.pressure * 0.8f) *
+                                       glm::max(vessel.burst_scale, 0.50f);
+            }
+        }
 
         if (!vessel.ruptured && vessel.pressure > rupture_threshold) {
             vessel.ruptured = true;
@@ -2896,19 +2942,12 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.ignition_delay = 0.18f;
                 vessel.ignition_window = 0.18f;
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD) {
-                // "Impact-only" rocket: propels on its own fuse/nozzle, but the
-                // rupture threshold is so high that internal gas pressure alone
-                // can't detonate it in flight. Rupture only happens when the shell
-                // collides with something, because mpm_impact_contact slams shell
-                // temperature up to ~1000K on a hard hit, which then diffuses to
-                // the core, spikes gas_source, and pushes pressure past threshold.
-                // Tuning priorities:
-                //  - low gas_source + aggressive leak = steady-state pressure stays
-                //    well under rupture_threshold during cruise
-                //  - cold core (285K) so no internal slow-cook path
-                //  - strong thrust_scale compensates for the low working pressure
-                //  - payload_push very high since the eventual rupture is the
-                //    moment the shrapnel gets its only forward kick
+                // Building-block recipe:
+                //   B1 Armor Shell (stoneware)  +  B6 Propellant  +  B7 Containment
+                //   +  B3 crack-rate sensor  +  B4 velocity-drop sensor
+                //   +  B5 short delay fuse  +  B9 forward shrapnel
+                // Containment (rupture_scale 9.9) means pressure alone cannot
+                // rupture this bomb. The sensors are the only path to rupture.
                 shell_stiffness = 124000.0f;
                 shell_density *= 0.98f;
                 fuse_stiffness = 17000.0f;
@@ -2921,20 +2960,19 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.gas_mass = 0.06f;
                 vessel.axis_bias = 1.0f;
                 vessel.gas_source_scale = 0.35f;
-                vessel.rupture_scale = 4.50f;
+                vessel.rupture_scale = 9.90f;   // B7: sealed against pressure-rupture
                 vessel.burst_scale = 0.48f;
                 vessel.shell_push_scale = 0.62f;
                 vessel.core_push_scale = 0.82f;
                 vessel.leak_scale = 2.40f;
-                vessel.nozzle_open = 0.50f;
+                vessel.nozzle_open = 0.50f;    // B6: propellant nozzle
                 vessel.thrust_scale = 5.20f;
                 vessel.payload_push_scale = 5.50f;
                 vessel.payload_cone = 0.65f;
                 vessel.payload_directionality = 1.0f;
-                // Impact-triggered rupture. With rupture_scale at 4.5, normal gas
-                // pressure can't detonate it in flight — it only pops when the avg
-                // shell speed drops sharply, i.e. it hits something.
-                vessel.impact_rupture = true;
+                vessel.impact_rupture = true;                 // enable sensors
+                vessel.impact_crack_rate_threshold = 1.5f;    // B3: ~1.5 crack/s
+                vessel.trigger_to_rupture_delay = 0.04f;      // B5: 40 ms fuse
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 140000.0f;
                 payload_density = 6.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
@@ -3002,10 +3040,9 @@ static void fire_projectile(ng::vec2 origin) {
                 payload_initial_temp = g_projectile_auto_arm ? 332.0f : 300.0f;
                 payload_thermal = ng::vec4(1.28f, 1.44f, 0.76f, 0.06f);
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::LATERAL_CONTACT) {
-                // Impact-triggered side-burst charge. Body is inert in flight, then
-                // on contact the shell + core + payload all fling sideways
-                // (perpendicular to the flight axis) via side_blast_scale and a
-                // radial payload. Good for wall/ceiling clearing.
+                // Recipe: B1 shell + B7 containment + B3/B4 sensors + B5 short
+                // fuse + B9 radial shrapnel + strong side_blast. Body is inert in
+                // flight; on contact, fragments + shell push fling sideways.
                 shell_stiffness = 116000.0f;
                 shell_density *= 0.98f;
                 fuse_stiffness = 22000.0f;
@@ -3018,29 +3055,29 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.gas_mass = 0.06f;
                 vessel.axis_bias = 1.0f;
                 vessel.gas_source_scale = 0.30f;
-                vessel.rupture_scale = 5.00f;
+                vessel.rupture_scale = 9.90f;          // B7: sealed
                 vessel.burst_scale = 0.70f;
                 vessel.shell_push_scale = 0.40f;
                 vessel.core_push_scale = 0.60f;
                 vessel.leak_scale = 1.80f;
-                // Lateral dominance: side_blast_scale high, normal forward payload push low.
-                vessel.side_blast_scale = 3.40f;
+                vessel.side_blast_scale = 3.40f;       // dominant side push
                 vessel.payload_push_scale = 3.60f;
-                vessel.payload_cone = 0.02f;         // near-zero cone → radial spread
-                vessel.payload_directionality = 0.0f; // payload flies radially, not forward
+                vessel.payload_cone = 0.02f;           // near-zero → radial
+                vessel.payload_directionality = 0.0f;
                 vessel.plume_push_scale = 1.20f;
                 vessel.plume_heat_scale = 0.70f;
                 vessel.impact_rupture = true;
+                vessel.impact_crack_rate_threshold = 1.3f;  // B3: slightly looser
+                vessel.trigger_to_rupture_delay = 0.03f;    // B5: snappy
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 128000.0f;
                 payload_density = 5.2f * glm::max(g_ball_weight, 0.5f) / 6.0f;
                 payload_initial_temp = 300.0f;
                 payload_thermal = ng::vec4(0.14f, 0.22f, 1.00f, 0.00f);
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN) {
-                // Impact-triggered gravity-direction penetrator. On contact the
-                // preferred_axis snaps to (0,-1) so the burst and payload drive
-                // downward through whatever was struck. Denser body (5.4x) to
-                // punch into the surface with some momentum before detonating.
+                // Recipe: dense B1 armor body + B7 containment + B3/B4 sensors +
+                // B5 *long* fuse (0.12 s — the penetrator buries itself during
+                // this delay) + gravity-axis-snap + B9 downward shrapnel.
                 shell_stiffness = 148000.0f;
                 shell_density *= 1.14f;
                 fuse_stiffness = 24000.0f;
@@ -3051,19 +3088,21 @@ static void fire_projectile(ng::vec2 origin) {
                 core_initial_temp = 290.0f;
                 core_thermal = ng::vec4(1.10f, 1.40f, 0.68f, 0.00f);
                 vessel.gas_mass = 0.06f;
-                vessel.axis_bias = 1.0f;       // forward-biased until the impact snap happens
+                vessel.axis_bias = 1.0f;
                 vessel.gas_source_scale = 0.34f;
-                vessel.rupture_scale = 5.20f;
+                vessel.rupture_scale = 9.90f;           // B7: sealed
                 vessel.burst_scale = 0.80f;
                 vessel.shell_push_scale = 0.72f;
                 vessel.core_push_scale = 1.05f;
                 vessel.leak_scale = 1.70f;
                 vessel.payload_push_scale = 5.80f;
-                vessel.payload_cone = 0.76f;         // fairly tight cone along the (snapped) down axis
+                vessel.payload_cone = 0.76f;
                 vessel.payload_directionality = 1.0f;
                 vessel.plume_push_scale = 1.40f;
                 vessel.plume_heat_scale = 0.90f;
                 vessel.impact_rupture = true;
+                vessel.impact_crack_rate_threshold = 1.8f;  // B3: firmer impact needed
+                vessel.trigger_to_rupture_delay = 0.12f;    // B5: long dig-in delay
                 vessel.penetrate_on_impact = true;
                 payload_material = ng::MPMMaterial::THERMO_METAL;
                 payload_stiffness = 162000.0f;
@@ -3071,10 +3110,8 @@ static void fire_projectile(ng::vec2 origin) {
                 payload_initial_temp = 300.0f;
                 payload_thermal = ng::vec4(0.12f, 0.20f, 1.02f, 0.00f);
             } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CONCUSSION) {
-                // Impact-triggered concussion charge. Push-heavy but heat-light:
-                // plume_push / blast_push are amplified, plume_heat / blast_heat
-                // are knocked down so the blast moves everything without cooking
-                // it. No payload — the air pressure wave is the whole effect.
+                // Recipe: B1 shell + B7 containment + B3/B4 sensors + B5 very
+                // short fuse + B8 heat-light blast character. No payload.
                 shell_stiffness = 104000.0f;
                 shell_density *= 1.02f;
                 fuse_stiffness = 20000.0f;
@@ -3083,23 +3120,25 @@ static void fire_projectile(ng::vec2 origin) {
                 core_density *= 1.06f;
                 fuse_initial_temp = 440.0f;
                 core_initial_temp = 290.0f;
-                core_thermal = ng::vec4(0.14f, 0.36f, 1.02f, 0.02f);  // low outgas, low heat release
+                core_thermal = ng::vec4(0.14f, 0.36f, 1.02f, 0.02f);
                 shell_thermal = ng::vec4(0.00f, 0.06f, 1.12f, 0.00f);
                 fuse_thermal = ng::vec4(0.04f, 0.22f, 0.98f, 0.00f);
                 vessel.gas_mass = 0.12f;
-                vessel.axis_bias = 0.4f;           // blast is more radial than forward
-                vessel.gas_source_scale = 0.70f;    // still enough gas to make pressure matter at impact
-                vessel.rupture_scale = 4.80f;
-                vessel.burst_scale = 1.60f;         // big burst (pressure wave)
+                vessel.axis_bias = 0.4f;
+                vessel.gas_source_scale = 0.70f;
+                vessel.rupture_scale = 9.90f;          // B7: sealed
+                vessel.burst_scale = 1.60f;
                 vessel.shell_push_scale = 1.10f;
                 vessel.core_push_scale = 0.60f;
                 vessel.leak_scale = 1.40f;
-                vessel.plume_push_scale = 2.60f;    // big push
-                vessel.plume_heat_scale = 0.18f;    // almost no heat
-                vessel.plume_radius_scale = 1.45f;  // wide pressure wave
-                vessel.blast_push_scale = 2.80f;    // big blast impulse
-                vessel.blast_heat_scale = 0.14f;    // almost no blast heat
+                vessel.plume_push_scale = 2.60f;       // B8: push-heavy
+                vessel.plume_heat_scale = 0.18f;       //     heat-light
+                vessel.plume_radius_scale = 1.45f;
+                vessel.blast_push_scale = 2.80f;
+                vessel.blast_heat_scale = 0.14f;
                 vessel.impact_rupture = true;
+                vessel.impact_crack_rate_threshold = 1.3f;  // B3
+                vessel.trigger_to_rupture_delay = 0.02f;    // B5: instant pop
             }
 
             switch (preset_id) {
