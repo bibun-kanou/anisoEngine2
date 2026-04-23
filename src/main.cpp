@@ -7996,6 +7996,15 @@ int main(int, char**) {
             }
         }
         g_camera.set_viewport(engine.window().width(), engine.window().height());
+        // Keep g_wc.width/height in sync with the live window size. Several
+        // downstream systems (magnetic field shader overlay, metaball FBO
+        // bounds, camera utilities) use g_wc for their screen-to-world math.
+        // Without this sync, resizing the window leaves g_wc at the startup
+        // dimensions and the magnetic overlay drifts because it fed stale
+        // screen extents into g_camera.screen_to_world() which itself uses
+        // the fresh viewport.
+        g_wc.width  = engine.window().width();
+        g_wc.height = engine.window().height();
         ng::vec2 mouse_world = g_camera.screen_to_world(engine.input().mouse_pos());
         const bool allow_temp_hotkeys = (!g_creation.active && !g_selection_mode && !imgui_mouse);
         const bool heat_hotkey = allow_temp_hotkeys && engine.input().key_down(SDL_SCANCODE_G);
