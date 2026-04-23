@@ -5014,18 +5014,68 @@ static void pop_panel_style() {
     ImGui::PopStyleColor(8);
 }
 
-static ImVec2 next_panel_position(ImVec2 size, ng::f32& cursor_x, ng::f32& cursor_y,
-                                  ng::f32& row_height, ng::f32 start_x, ng::f32 max_x) {
-    const ng::f32 gap = 10.0f;
-    if (cursor_x > start_x && (cursor_x + size.x) > max_x) {
-        cursor_x = start_x;
-        cursor_y += row_height + gap;
-        row_height = 0.0f;
+// Actual placed-rect for each toggleable user window. Captured at draw time
+// via ImGui::GetWindowPos/Size so the smart slot-finder below can avoid
+// overlap with wherever the user has dragged each window to.
+struct UiWinRect {
+    bool visible = false;
+    ImVec2 pos = {0, 0};
+    ImVec2 size = {0, 0};
+};
+static UiWinRect g_rect_interaction;
+static UiWinRect g_rect_environment;
+static UiWinRect g_rect_backends;
+static UiWinRect g_rect_appearance;
+static UiWinRect g_rect_advanced;
+static UiWinRect g_rect_presets;
+
+// Scan left-to-right, top-to-bottom for a position where a new window of
+// `size` does not overlap any of `occupied`. When overlapping the X interval
+// of an existing window, jump X past the right edge of the rightmost
+// overlapper on this row — that's much faster than pixel-stepping, and
+// produces tidier packing.
+static ImVec2 find_free_slot(ImVec2 size, const std::vector<const UiWinRect*>& occupied,
+                             ImVec2 vp_min, ImVec2 vp_max) {
+    const float gap = 10.0f;
+    auto y_hits = [&](float y0, float y1, const UiWinRect* r) {
+        float ry0 = r->pos.y, ry1 = r->pos.y + r->size.y;
+        return !(y1 + gap <= ry0 || y0 >= ry1 + gap);
+    };
+    auto x_hits = [&](float x0, float x1, const UiWinRect* r) {
+        float rx0 = r->pos.x, rx1 = r->pos.x + r->size.x;
+        return !(x1 + gap <= rx0 || x0 >= rx1 + gap);
+    };
+
+    float y = vp_min.y;
+    while (y + size.y <= vp_max.y + 1.0f) {
+        float x = vp_min.x;
+        while (x + size.x <= vp_max.x + 1.0f) {
+            // Does the candidate rect at (x, y, size) overlap anything?
+            float max_right_edge = -1e9f;
+            for (const UiWinRect* r : occupied) {
+                if (!r->visible) continue;
+                if (!y_hits(y, y + size.y, r)) continue;
+                if (!x_hits(x, x + size.x, r)) continue;
+                max_right_edge = glm::max(max_right_edge, r->pos.x + r->size.x);
+            }
+            if (max_right_edge < 0.0f) {
+                return ImVec2(x, y);
+            }
+            x = max_right_edge + gap;
+        }
+        // Advance Y past the bottom of the lowest occupant intersecting this band,
+        // to the next row.
+        float next_y = vp_max.y + 1.0f;
+        for (const UiWinRect* r : occupied) {
+            if (!r->visible) continue;
+            float r_bottom = r->pos.y + r->size.y;
+            if (r_bottom > y && r_bottom < next_y) next_y = r_bottom;
+        }
+        if (next_y > vp_max.y) break;
+        y = next_y + gap;
     }
-    ImVec2 pos(cursor_x, cursor_y);
-    cursor_x += size.x + gap;
-    row_height = glm::max(row_height, size.y);
-    return pos;
+    // Fallback — nothing fit; stack at top-left (user will need to drag).
+    return ImVec2(vp_min.x, vp_min.y);
 }
 
 static void draw_window_toggle_button(const char* label, bool* open, ImVec4 accent) {
@@ -5146,6 +5196,7 @@ static void draw_environment_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool
         pop_panel_style();
         return;
     }
+    g_rect_environment = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
     ImGui::PushTextWrapPos(0.0f);
 
     ng::SPHParams& sp = const_cast<ng::SPHParams&>(g_sph.params());
@@ -5210,6 +5261,7 @@ static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool for
         pop_panel_style();
         return;
     }
+    g_rect_presets = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
     ImGui::PushTextWrapPos(0.0f);
 
     if (ImGui::CollapsingHeader("Runtime Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -6280,6 +6332,7 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool
         pop_panel_style();
         return;
     }
+    g_rect_interaction = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
     ImGui::PushTextWrapPos(0.0f);
 
     ng::MPMParams& mp = g_mpm.params();
@@ -6530,6 +6583,7 @@ static void draw_backends_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool fo
         pop_panel_style();
         return;
     }
+    g_rect_backends = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
     ImGui::PushTextWrapPos(0.0f);
 
     ng::SPHParams& sp = const_cast<ng::SPHParams&>(g_sph.params());
@@ -6617,6 +6671,7 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
         pop_panel_style();
         return;
     }
+    g_rect_appearance = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
     ImGui::PushTextWrapPos(0.0f);
 
     if (ImGui::CollapsingHeader("Visualization", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -6712,14 +6767,17 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
 
         // Always-on field shader. This is the globally-accessible version of
         // debug-view-5 — you can see scene magnets + ferrofluid magnetization
-        // without opening the debug panel or holding M. When both this AND
-        // the magnetic debug view 5 are on, the same shader runs.
+        // without opening the debug panel. When both this AND the magnetic
+        // debug view 5 are on, the same shader runs.
         //
-        // While on, we also auto-seed a very weak probe cursor at the mouse
-        // position (see the main input block) so the overlay always has
-        // something to show even in scenes without permanent magnets.
+        // The overlay ONLY shows fields produced by scene sources: permanent
+        // magnets, soft iron, magnetic rubber, and ferrofluid magnetizing in
+        // response to those. If your scene has no magnetic sources and you
+        // aren't holding M, the field is genuinely zero and the overlay
+        // renders nothing — that's not a bug, just physics. Hold M or place
+        // a scene magnet to seed a field.
         ImGui::Checkbox("Show Magnetic Field", &g_show_mag_field_overlay);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader: shows scene magnets, ferrofluid magnetization, and a weak mouse-anchored probe cursor. Independent of the debug panel and the M hotkey. Also auto-runs the solver each frame.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global always-on field shader. Shows the field produced by scene magnets + ferrofluid magnetization. Requires at least one magnetic source (scene magnet, or M held) to show anything; ferrofluid alone produces no field because it needs an external seed to magnetize.");
         if (g_show_mag_field_overlay) {
             ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up to see subtle far-field regions that would otherwise disappear.");
@@ -6760,6 +6818,7 @@ static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool fo
         pop_panel_style();
         return;
     }
+    g_rect_advanced = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
     ImGui::PushTextWrapPos(0.0f);
 
     ng::MPMParams& mp = g_mpm.params();
@@ -8229,17 +8288,6 @@ int main(int, char**) {
                 // than the average scene magnet — enough to visibly distort the
                 // field even in strong-field scenes.
                 magp.cursor_strength = g_magnet_strength * 0.09f;
-            } else if (g_show_mag_field_overlay) {
-                // Global field-viz toggle auto-seeds a weak probe cursor at
-                // the mouse position, so the overlay has SOMETHING to show
-                // even if the scene has no permanent magnets and M isn't
-                // being held. Strength is well below holding M (~8% of the
-                // brush strength) so it doesn't noticeably pull particles,
-                // but it's strong enough to produce a visible field pattern
-                // and to seed ferrofluid magnetization for self-clustering
-                // demos. If the user then holds M, the full brush strength
-                // takes over.
-                magp.cursor_strength = g_magnet_strength * 0.007f;
             }
         }
 
@@ -8531,11 +8579,10 @@ int main(int, char**) {
         if (g_show_ui) {
             draw_ui_top_bar(frame_ms);
             ImGuiViewport* viewport = ImGui::GetMainViewport();
-            ng::f32 start_x = viewport->WorkPos.x + 10.0f;
-            ng::f32 cursor_x = start_x;
-            ng::f32 cursor_y = viewport->WorkPos.y + 56.0f;
-            ng::f32 row_height = 0.0f;
-            ng::f32 max_x = viewport->WorkPos.x + viewport->WorkSize.x - 10.0f;
+            ImVec2 vp_min(viewport->WorkPos.x + 10.0f,
+                          viewport->WorkPos.y + 56.0f);
+            ImVec2 vp_max(viewport->WorkPos.x + viewport->WorkSize.x - 10.0f,
+                          viewport->WorkPos.y + viewport->WorkSize.y - 10.0f);
 
             const ImVec2 interaction_size(360.0f, 520.0f);
             const ImVec2 environment_size(350.0f, 430.0f);
@@ -8545,11 +8592,10 @@ int main(int, char**) {
             const ImVec2 presets_size(340.0f, 230.0f);
 
             // Track previous-frame open state per window. When a window
-            // transitions hidden -> shown, we re-snap it to the next_panel
-            // auto-layout slot by passing force_reposition=true for one frame
-            // (which uses ImGuiCond_Always instead of ImGuiCond_FirstUseEver).
-            // This is what restores "new windows try to find empty space"
-            // behavior after the switch to draggable windows.
+            // transitions hidden -> shown, we pick a fresh slot via
+            // find_free_slot() that avoids ALL currently-visible windows
+            // (including ones the user has dragged to custom positions) —
+            // not just the previously-placed window in the dispatch order.
             static bool prev_show_interaction = false;
             static bool prev_show_environment = false;
             static bool prev_show_backends    = false;
@@ -8561,37 +8607,70 @@ int main(int, char**) {
                 prev = show;
                 return opened;
             };
+            // A window isn't drawn this frame — its last-known rect must not
+            // be considered occupied for slot-finding of OTHER windows.
+            auto hide_rect = [](bool& prev, UiWinRect& r) {
+                prev = false;
+                r.visible = false;
+            };
+            // All six rects in a fixed order; we exclude the calling window's
+            // own rect when computing occupied so we don't collide with our
+            // own stale/prev-frame entry.
+            const UiWinRect* all_rects[] = {
+                &g_rect_interaction, &g_rect_environment, &g_rect_backends,
+                &g_rect_appearance,  &g_rect_advanced,    &g_rect_presets
+            };
+            auto others_of = [&](const UiWinRect* self) {
+                std::vector<const UiWinRect*> v;
+                v.reserve(5);
+                for (const UiWinRect* r : all_rects) if (r != self) v.push_back(r);
+                return v;
+            };
+            // Just-opened placement: find an empty slot in the viewport that
+            // clears every other currently-visible window, then claim it
+            // immediately so any later arm this frame sees the placed rect.
+            auto slot_for = [&](UiWinRect& self, ImVec2 size) -> ImVec2 {
+                ImVec2 p = find_free_slot(size, others_of(&self), vp_min, vp_max);
+                self = { true, p, size };
+                return p;
+            };
 
             if (g_show_interaction_window) {
-                ImVec2 pos = next_panel_position(interaction_size, cursor_x, cursor_y, row_height, start_x, max_x);
                 bool fp = just_opened(g_show_interaction_window, prev_show_interaction);
+                ImVec2 pos = fp ? slot_for(g_rect_interaction, interaction_size)
+                                : ImVec2(0, 0);
                 draw_interaction_window(pos, interaction_size, kInteractionAccent, fp);
-            } else { prev_show_interaction = false; }
+            } else { hide_rect(prev_show_interaction, g_rect_interaction); }
             if (g_show_environment_window) {
-                ImVec2 pos = next_panel_position(environment_size, cursor_x, cursor_y, row_height, start_x, max_x);
                 bool fp = just_opened(g_show_environment_window, prev_show_environment);
+                ImVec2 pos = fp ? slot_for(g_rect_environment, environment_size)
+                                : ImVec2(0, 0);
                 draw_environment_window(pos, environment_size, kEnvironmentAccent, fp);
-            } else { prev_show_environment = false; }
+            } else { hide_rect(prev_show_environment, g_rect_environment); }
             if (g_show_backends_window) {
-                ImVec2 pos = next_panel_position(backends_size, cursor_x, cursor_y, row_height, start_x, max_x);
                 bool fp = just_opened(g_show_backends_window, prev_show_backends);
+                ImVec2 pos = fp ? slot_for(g_rect_backends, backends_size)
+                                : ImVec2(0, 0);
                 draw_backends_window(pos, backends_size, kBackendsAccent, fp);
-            } else { prev_show_backends = false; }
+            } else { hide_rect(prev_show_backends, g_rect_backends); }
             if (g_show_appearance_window) {
-                ImVec2 pos = next_panel_position(appearance_size, cursor_x, cursor_y, row_height, start_x, max_x);
                 bool fp = just_opened(g_show_appearance_window, prev_show_appearance);
+                ImVec2 pos = fp ? slot_for(g_rect_appearance, appearance_size)
+                                : ImVec2(0, 0);
                 draw_appearance_window(pos, appearance_size, kAppearanceAccent, fp);
-            } else { prev_show_appearance = false; }
+            } else { hide_rect(prev_show_appearance, g_rect_appearance); }
             if (g_show_advanced_window) {
-                ImVec2 pos = next_panel_position(advanced_size, cursor_x, cursor_y, row_height, start_x, max_x);
                 bool fp = just_opened(g_show_advanced_window, prev_show_advanced);
+                ImVec2 pos = fp ? slot_for(g_rect_advanced, advanced_size)
+                                : ImVec2(0, 0);
                 draw_advanced_window(pos, advanced_size, kAdvancedAccent, fp);
-            } else { prev_show_advanced = false; }
+            } else { hide_rect(prev_show_advanced, g_rect_advanced); }
             if (g_show_presets_window) {
-                ImVec2 pos = next_panel_position(presets_size, cursor_x, cursor_y, row_height, start_x, max_x);
                 bool fp = just_opened(g_show_presets_window, prev_show_presets);
+                ImVec2 pos = fp ? slot_for(g_rect_presets, presets_size)
+                                : ImVec2(0, 0);
                 draw_presets_window(pos, presets_size, kPresetsAccent, fp);
-            } else { prev_show_presets = false; }
+            } else { hide_rect(prev_show_presets, g_rect_presets); }
         }
 
         if (g_show_pipeline_prev && !g_show_pipeline) {
