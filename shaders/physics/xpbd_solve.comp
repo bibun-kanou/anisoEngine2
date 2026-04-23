@@ -1,0 +1,54 @@
+#version 450 core
+
+layout(local_size_x = 64) in;
+
+// Distance-constraint solve pass (XPBD Jacobi). Each invocation handles
+// one constraint; it computes a signed correction along the edge and
+// scatters equal-and-opposite deltas into per-particle fixed-point
+// accumulators via atomic adds. The apply pass decodes and commits them.
+
+layout(std430, binding = 0) readonly buffer Positions { vec2 positions[]; };
+
+struct Constraint {
+    uint p_a;
+    uint p_b;
+    float rest_len;
+    float compliance;
+};
+layout(std430, binding = 30) readonly buffer Constraints { Constraint constraints[]; };
+layout(std430, binding = 31) coherent buffer CorrectionX { int accum_x[]; };
+layout(std430, binding = 32) coherent buffer CorrectionY { int accum_y[]; };
+
+uniform uint u_constraint_count;
+uniform float u_dt;
+
+// Fixed-point scale for position deltas. 4096 gives sub-millimeter
+// resolution on scenes up to a few meters, which is well below any
+// visible rope jitter.
+const float FIXED_SCALE = 4096.0;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_constraint_count) return;
+
+    Constraint c = constraints[idx];
+    vec2 a = positions[c.p_a];
+    vec2 b = positions[c.p_b];
+    vec2 delta = b - a;
+    float len = length(delta);
+    if (len < 1e-5) return;
+
+    vec2 dir = delta / len;
+    float err = len - c.rest_len;
+    // XPBD compliance blend: alpha = compliance / dt^2. alpha = 0 gives the
+    // rigid PBD correction; larger alpha softens toward pure spring.
+    float alpha = c.compliance / max(u_dt * u_dt, 1e-9);
+    float correction = err / (2.0 + alpha);
+
+    vec2 dpa =  dir * correction; // move a toward b by `correction`
+    vec2 dpb = -dir * correction; // move b toward a by the same
+    atomicAdd(accum_x[c.p_a], int(round(dpa.x * FIXED_SCALE)));
+    atomicAdd(accum_y[c.p_a], int(round(dpa.y * FIXED_SCALE)));
+    atomicAdd(accum_x[c.p_b], int(round(dpb.x * FIXED_SCALE)));
+    atomicAdd(accum_y[c.p_b], int(round(dpb.y * FIXED_SCALE)));
+}

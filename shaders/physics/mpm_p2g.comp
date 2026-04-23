@@ -129,6 +129,7 @@ uniform vec2  u_magnetic_world_max;
 #define MAT_POSITIVE_ION 77u
 #define MAT_NEGATIVE_ION 78u
 #define MAT_TRIBOELECTRIC 79u
+#define MAT_ROPE_SEGMENT 80u
 
 #include "common/mpm_utils.glsl"
 
@@ -356,6 +357,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == MAT_POSITIVE_ION) return vec4(0.04, 0.80, 0.88, 0.03);
     if (mat_type == MAT_NEGATIVE_ION) return vec4(0.04, 0.78, 0.90, 0.03);
     if (mat_type == MAT_TRIBOELECTRIC) return vec4(0.02, 0.82, 0.82, 0.04);
+    if (mat_type == MAT_ROPE_SEGMENT) return vec4(0.02, 0.85, 0.80, 0.03);
     if (mat_type == MAT_MAILLARD) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == MAT_MUSHROOM) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == MAT_CRUMB_LOAF) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -495,6 +497,16 @@ void main() {
         F = mat2(sqrt(max(J, 0.01)));
         J = max(J, 0.01);
         stress = mat2(lambda * J * (J - 1.0));
+    }
+    else if (mat_type == MAT_ROPE_SEGMENT) {
+        // Rope particle: zero MPM stress. XPBD distance constraints
+        // handle all structural forces after the MPM step. Gravity,
+        // drag, and magnetic forces still apply via G2P velocity
+        // updates — the constraint pass corrects positions to preserve
+        // segment lengths.
+        F = mat2(1.0);
+        J = 1.0;
+        stress = mat2(0.0);
     }
     else if (mat_type == MAT_FLAMMABLE_FLUID) {
         float burn = damage[idx];

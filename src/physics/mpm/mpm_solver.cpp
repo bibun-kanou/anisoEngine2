@@ -61,6 +61,8 @@ vec4 default_thermal_coupling(MPMMaterial material) {
             return vec4(0.04f, 0.78f, 0.90f, 0.03f);
         case MPMMaterial::TRIBOELECTRIC:
             return vec4(0.02f, 0.82f, 0.82f, 0.04f);
+        case MPMMaterial::ROPE_SEGMENT:
+            return vec4(0.02f, 0.85f, 0.80f, 0.03f);
         case MPMMaterial::MAILLARD:
             return vec4(0.30f, 0.65f, 0.60f, 0.08f);
         case MPMMaterial::MUSHROOM:
@@ -183,6 +185,7 @@ static vec4 material_spawn_color(MPMMaterial material) {
         case MPMMaterial::POSITIVE_ION:return vec4(0.95f, 0.55f, 0.30f, 1.0f);     // warm — like hot plasma
         case MPMMaterial::NEGATIVE_ION:return vec4(0.40f, 0.60f, 0.95f, 1.0f);     // cool — cold plasma
         case MPMMaterial::TRIBOELECTRIC:return vec4(0.62f, 0.52f, 0.88f, 1.0f);    // purple-rubber
+        case MPMMaterial::ROPE_SEGMENT:return vec4(0.64f, 0.48f, 0.32f, 1.0f);     // warm hemp
         case MPMMaterial::MAILLARD:return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM:return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::CRUMB_LOAF:return vec4(0.95f, 0.80f, 0.54f, 1.0f);

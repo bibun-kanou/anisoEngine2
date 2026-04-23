@@ -464,6 +464,7 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     if (mat_type == 77u) return vec4(0.04, 0.80, 0.88, 0.03); // positive ion: light gas-like
     if (mat_type == 78u) return vec4(0.04, 0.78, 0.90, 0.03); // negative ion: similar
     if (mat_type == 79u) return vec4(0.02, 0.82, 0.82, 0.04); // triboelectric solid
+    if (mat_type == 80u) return vec4(0.02, 0.85, 0.80, 0.03); // rope segment
     if (mat_type == 32u) return vec4(0.30, 0.65, 0.60, 0.08);
     if (mat_type == 33u) return vec4(0.60, 0.35, 0.76, 0.22);
     if (mat_type == 34u) return vec4(0.95, 0.72, 0.78, 0.12);
@@ -698,6 +699,7 @@ void main() {
     else if (mat_type == 77u) max_speed_cells = 1.60; // positive ion: light, can be pushed fast by field
     else if (mat_type == 78u) max_speed_cells = 1.60; // negative ion: same
     else if (mat_type == 79u) max_speed_cells = 0.70; // triboelectric solid: moderate
+    else if (mat_type == 80u) max_speed_cells = 1.20; // rope segment: can swing freely
     else if (mat_type == 57u) max_speed_cells = 0.90; // soft iron can move, but not launch across the map
     else if (mat_type == 58u) max_speed_cells = 1.20; // rubber gets a little more room for bend response
 
@@ -1096,7 +1098,7 @@ void main() {
                          mat_type == 69u || mat_type == 70u || mat_type == 71u ||
                          mat_type == 72u || mat_type == 73u || mat_type == 74u ||
                          mat_type == 75u || mat_type == 76u || mat_type == 77u ||
-                         mat_type == 78u || mat_type == 79u);
+                         mat_type == 78u || mat_type == 79u || mat_type == 80u);
     // Heat source only: gun + scene source + grid contact, no ambient cooling
     // Includes structural materials so they CAN be heated/ignited
     bool heat_source_only = (mat_type == 3u || mat_type == 5u ||

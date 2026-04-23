@@ -96,6 +96,7 @@ enum class MPMMaterial : u32 {
     POSITIVE_ION = 77,
     NEGATIVE_ION = 78,
     TRIBOELECTRIC = 79,
+    ROPE_SEGMENT = 80,
 };
 
 vec4 default_thermal_coupling(MPMMaterial material);

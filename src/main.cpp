@@ -13,6 +13,7 @@
 #include "physics/sdf/sdf_field.h"
 #include "physics/magnetic/magnetic_field.h"
 #include "physics/electrostatic/electrostatic_field.h"
+#include "physics/xpbd/xpbd_field.h"
 #include "physics/eulerian/euler_fluid.h"
 #include "render/particle_renderer.h"
 #include "render/sdf_renderer.h"
@@ -40,6 +41,7 @@ static ng::UniformGrid    g_mpm_grid;
 static ng::SDFField       g_sdf;
 static ng::MagneticField  g_magnetic;
 static ng::ElectrostaticField g_electrostatic;
+static ng::XpbdField g_xpbd;
 static ng::EulerianFluid  g_air;
 static ng::ParticleRenderer g_particle_renderer;
 static ng::SDFRenderer    g_sdf_renderer;
@@ -7073,6 +7075,12 @@ static void init_systems() {
     g_electrostatic.init(ec);
     g_mpm.set_electrostatic(&g_electrostatic);
 
+    // XPBD solver — inter-particle distance/bend constraints for ropes,
+    // chains, and (future) cloth. No per-scene config beyond capacity.
+    ng::XpbdField::Config xc;
+    xc.max_constraints = 200000u;
+    g_xpbd.init(xc);
+
     ng::UniformGrid::Config gc;
     gc.world_min = scene_cfg.grid_world_min;
     gc.world_max = scene_cfg.grid_world_max;
@@ -8119,6 +8127,29 @@ int main(int, char**) {
             if (engine.input().key_pressed(SDL_SCANCODE_R)) reload_scene();
             if (engine.input().key_pressed(SDL_SCANCODE_U)) g_show_ui = !g_show_ui;
             if (engine.input().key_pressed(SDL_SCANCODE_X)) g_selection_mode = !g_selection_mode;
+            // Y = spawn rope at cursor — quick XPBD demo. The rope hangs
+            // vertically by default from the mouse world position.
+            if (engine.input().key_pressed(SDL_SCANCODE_Y)) {
+                const int N_SEGMENTS = 24;
+                const float SEGMENT_LEN = 0.05f;
+                ng::vec2 top = g_camera.screen_to_world(engine.input().mouse_pos());
+                std::vector<ng::vec2> rope_positions(N_SEGMENTS);
+                std::vector<ng::f32> shell_seeds(N_SEGMENTS, 0.0f);
+                for (int i = 0; i < N_SEGMENTS; ++i) {
+                    rope_positions[i] = ng::vec2(top.x, top.y - static_cast<ng::f32>(i) * SEGMENT_LEN);
+                }
+                // Offset where new particles will land is the current end
+                // of the MPM range.
+                const auto& mpm_range = g_particles.range(ng::SolverType::MPM);
+                ng::u32 rope_start_global = mpm_range.offset + mpm_range.count;
+                g_mpm.spawn_points(g_particles, rope_positions, shell_seeds,
+                                   SEGMENT_LEN, ng::MPMMaterial::ROPE_SEGMENT,
+                                   300.0f, ng::vec2(0.0f), 1.0f, ng::vec4(1.0f));
+                // Register N-1 distance constraints between consecutive
+                // segments. Compliance 0 = rigid.
+                g_xpbd.append_chain_constraints(rope_start_global, N_SEGMENTS,
+                                                SEGMENT_LEN, 0.0f);
+            }
             if (engine.input().key_pressed(SDL_SCANCODE_DELETE) || engine.input().key_pressed(SDL_SCANCODE_BACKSPACE))
                 clear_non_sdf_objects();
 
@@ -8442,6 +8473,10 @@ int main(int, char**) {
                        mouse_force.world_pos, mouse_force.radius, mouse_force.force,
                        mouse_force.drag_dir, mouse_force.mode, mouse_force.inner_radius,
                        mouse_force.damping);
+            // XPBD constraint solve — runs after MPM has moved positions by
+            // v*dt. Corrects rope/cloth particles to satisfy distance
+            // constraints. No-op if no constraints are registered.
+            g_xpbd.step(g_particles, physics_dt);
             g_sph.step(g_particles, g_hash, physics_dt, &g_sdf, mouse_force, &g_mpm_grid, &g_air);
             g_air.clear_particle_injection_sources();
             update_pressure_vessels(physics_dt);

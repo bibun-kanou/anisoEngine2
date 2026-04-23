@@ -263,6 +263,7 @@ vec4 default_material_color(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::POSITIVE_ION: return vec4(0.95f, 0.55f, 0.30f, 1.0f);
         case MPMMaterial::NEGATIVE_ION: return vec4(0.40f, 0.60f, 0.95f, 1.0f);
         case MPMMaterial::TRIBOELECTRIC: return vec4(0.62f, 0.52f, 0.88f, 1.0f);
+        case MPMMaterial::ROPE_SEGMENT: return vec4(0.64f, 0.48f, 0.32f, 1.0f);
         case MPMMaterial::MAILLARD: return vec4(0.96f, 0.84f, 0.54f, 1.0f);
         case MPMMaterial::MUSHROOM: return vec4(0.72f, 0.68f, 0.52f, 1.0f);
         case MPMMaterial::ORTHO_BEND: return vec4(0.78f, 0.56f, 0.26f, 1.0f);
@@ -353,6 +354,7 @@ std::string technique_summary(SpawnSolver solver, MPMMaterial mpm_type) {
         case MPMMaterial::POSITIVE_ION: return "Positive plasma ion cloud (charge q=+1). Accelerates along the electrostatic field E; in an ambient E pointing up, ions stream upward. Repels other positives (scene-generated E from neighboring positives), attracts negatives. Warm orange.";
         case MPMMaterial::NEGATIVE_ION: return "Negative plasma ion cloud (charge q=-1). Mirror of the positive ion. Streams opposite the E field; pair a positive and negative cloud and watch them fly into each other.";
         case MPMMaterial::TRIBOELECTRIC: return "Neutral rubber-like solid (charge starts at 0) that will build surface charge via contact friction in a future revision. For now it's a neutral solid baseline for testing the charge infrastructure; set Ambient E and a nonzero charge value via future scripting.";
+        case MPMMaterial::ROPE_SEGMENT: return "XPBD rope segment particle. Constitutive MPM stress = 0 — structural behavior comes entirely from XPBD distance constraints between consecutive segments. Use the 'Spawn Rope' button in the Interaction window (or press 'R') to create a chain of these connected by distance constraints at the cursor.";
         case MPMMaterial::MAG_SOFT_IRON: return "Real magnetics benchmark: soft iron body that samples the solved magnetic field and pulls toward stronger |H|^2 regions.";
         case MPMMaterial::MAGNETIC_RUBBER: return "Real magnetics benchmark: compliant magnetizable solid that bends and drifts under the solved magnetic field.";
         case MPMMaterial::MAILLARD: return "Cooking surface model: browning, drying, shell-setting, and steam blistering without a full bread-like rise.";

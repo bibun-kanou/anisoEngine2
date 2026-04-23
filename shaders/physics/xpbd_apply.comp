@@ -1,0 +1,32 @@
+#version 450 core
+
+layout(local_size_x = 64) in;
+
+// Apply pass — per-particle: decode accumulated fixed-point deltas, add
+// them to the particle position, zero the accumulator for the next
+// iteration / frame.
+
+layout(std430, binding = 0) coherent buffer Positions { vec2 positions[]; };
+layout(std430, binding = 31) coherent buffer CorrectionX { int accum_x[]; };
+layout(std430, binding = 32) coherent buffer CorrectionY { int accum_y[]; };
+
+uniform uint u_particle_count;
+uniform uint u_offset;
+
+const float FIXED_SCALE = 4096.0;
+const float INV_FIXED_SCALE = 1.0 / FIXED_SCALE;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_particle_count) return;
+
+    uint p = u_offset + idx;
+    int ax = accum_x[p];
+    int ay = accum_y[p];
+    if (ax == 0 && ay == 0) return;
+
+    vec2 delta = vec2(float(ax), float(ay)) * INV_FIXED_SCALE;
+    positions[p] += delta;
+    accum_x[p] = 0;
+    accum_y[p] = 0;
+}
