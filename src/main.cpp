@@ -138,7 +138,9 @@ enum class ProjectilePreset : int {
     // Contact-triggered launcher2 weapons (use impact_rupture)
     LATERAL_CONTACT_CHARGE = 60,
     GRAVITY_PENETRATOR = 61,
-    CONCUSSION_CHARGE = 62
+    CONCUSSION_CHARGE = 62,
+    // Fully user-configurable weapon. See CustomWeaponRecipe.
+    CUSTOM_WEAPON = 63
 };
 
 enum class ProjectileDragMode : int {
@@ -418,6 +420,64 @@ static int g_ball_preset = static_cast<int>(ProjectilePreset::STEEL);
 // fuses, payloads, drag-aim) applies automatically.
 enum class Launcher2Preset : int { TIME_BOMB = 0, ROCKET = 1, CLAYMORE = 2 };
 static int g_launcher2_preset = static_cast<int>(Launcher2Preset::TIME_BOMB);
+
+// Modular weapon recipe. Every field corresponds to one building block (B1-B9
+// + Special) from the design doc. Edited live via the launcher2 UI panel and
+// applied to the vessel when the CUSTOM_WEAPON preset is fired. Defaults form
+// a reasonable "impact-triggered light bomb".
+struct CustomWeaponRecipe {
+    // B1 Shell
+    ng::MPMMaterial shell_material = ng::MPMMaterial::STONEWARE;
+    ng::f32 shell_stiffness = 110000.0f;
+    ng::f32 shell_density  = 3.6f;
+
+    // B2 Thermal Isolation
+    bool     thermal_isolation = true;
+    ng::f32  fuse_rest_temp = 460.0f;
+    ng::f32  core_rest_temp = 290.0f;
+
+    // B3 Crack sensor + B4 Velocity sensor (both gated by impact_rupture)
+    bool     impact_rupture = true;           // enables B3/B4/B5 pipeline
+    ng::f32  crack_rate_threshold = 1.5f;     // crack/s
+
+    // B5 Delay fuse
+    ng::f32  delay_ms = 40.0f;                // ms from trigger to rupture
+
+    // B6 Propellant
+    bool     propellant_enabled = false;
+    ng::f32  thrust_scale = 3.5f;
+    ng::f32  nozzle_open = 0.45f;
+    ng::f32  propellant_duration = 2.0f;
+    ng::f32  fuse_initial_temp = 470.0f;      // propellant heat source
+
+    // B7 Containment (rupture scale — 9.9 = sealed, <4 = pressure-ruptures)
+    ng::f32  rupture_scale = 9.9f;
+
+    // B8 Main charge / blast character
+    ng::f32  burst_scale = 0.55f;
+    ng::f32  plume_push_scale = 1.10f;
+    ng::f32  plume_heat_scale = 0.80f;
+    ng::f32  blast_push_scale = 1.00f;
+    ng::f32  blast_heat_scale = 0.80f;
+
+    // B9 Payload
+    bool     payload_enabled = true;
+    ng::MPMMaterial payload_material = ng::MPMMaterial::THERMO_METAL;
+    ng::f32  payload_stiffness = 140000.0f;
+    ng::f32  payload_density   = 5.6f;
+    ng::f32  payload_push_scale = 4.5f;
+    ng::f32  payload_cone = 0.62f;            // near 0 = wide radial, near 1 = tight
+    ng::f32  payload_directionality = 1.0f;   // 0 = radial, 1 = forward
+
+    // Special
+    bool     penetrate_on_impact = false;     // snap burst to gravity on impact
+    ng::f32  side_blast_scale = 0.0f;         // > 0 = lateral shell/core push
+    ng::f32  axis_bias = 1.0f;                // 1 forward, 0 radial
+    ng::f32  gas_source_scale = 0.45f;        // how fast gas builds (contributes to pressure)
+    ng::f32  leak_scale = 2.00f;              // how fast gas vents through cracks/nozzle
+};
+
+static CustomWeaponRecipe g_custom_recipe;
 static int g_ball_shape = 0;
 static bool g_projectile_auto_arm = true;
 static ProjectileDragMode g_ball_drag_mode = ProjectileDragMode::NONE;
@@ -1008,7 +1068,10 @@ struct ProjectilePresetDesc {
         //                       low heat — a "stun" blast instead of an incendiary.
         LATERAL_CONTACT = 28,
         PENETRATING_DOWN = 29,
-        CONCUSSION = 30
+        CONCUSSION = 30,
+        // User-configurable weapon. All vessel parameters come from
+        // g_custom_recipe instead of being hardcoded in the vessel_mode switch.
+        CUSTOM = 31
     };
 
     Kind kind;
@@ -1023,11 +1086,9 @@ struct ProjectilePresetDesc {
 
 static ProjectilePreset active_projectile_preset_id() {
     if (g_mode == InteractMode::LAUNCHER2) {
-        // Nine-weapon palette for the key-6 launcher. Rows 4-6 are hybrid
-        // compositions (rocket+payload, rocket+side-claymores, claymore+cluster),
-        // rows 7-9 are contact-triggered variants that detonate only on impact
-        // (lateral burst, gravity-direction penetrator, concussion wave).
-        static constexpr ProjectilePreset kLauncher2[9] = {
+        // Ten-slot palette for the key-6 launcher. Slot 10 is the user-built
+        // weapon composed from building blocks live in the tool panel.
+        static constexpr ProjectilePreset kLauncher2[10] = {
             ProjectilePreset::REAL_TIME_BOMB,
             ProjectilePreset::ROCKET,
             ProjectilePreset::CLAYMORE,
@@ -1036,12 +1097,13 @@ static ProjectilePreset active_projectile_preset_id() {
             ProjectilePreset::CLAYMORE_CLUSTER,
             ProjectilePreset::LATERAL_CONTACT_CHARGE,
             ProjectilePreset::GRAVITY_PENETRATOR,
-            ProjectilePreset::CONCUSSION_CHARGE
+            ProjectilePreset::CONCUSSION_CHARGE,
+            ProjectilePreset::CUSTOM_WEAPON
         };
-        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 8)];
+        return kLauncher2[glm::clamp(g_launcher2_preset, 0, 9)];
     }
     return static_cast<ProjectilePreset>(
-        glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::CONCUSSION_CHARGE)));
+        glm::clamp(g_ball_preset, 0, static_cast<int>(ProjectilePreset::CUSTOM_WEAPON)));
 }
 
 static ProjectilePresetDesc current_projectile_preset() {
@@ -1233,6 +1295,9 @@ static ProjectilePresetDesc current_projectile_preset() {
     case ProjectilePreset::CONCUSSION_CHARGE:
         return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::CONCUSSION, ng::MPMMaterial::SEALED_CHARGE, 72000.0f, 4.2f * weight_scale, 300.0f, ng::vec4(1.14f, 0.30f, 0.90f, 0.06f),
                  "Concussion charge: high-pressure shockwave with deliberately low heat. Pushes things hard without setting them on fire or leaving a persistent hot zone. Detonates on contact." };
+    case ProjectilePreset::CUSTOM_WEAPON:
+        return { ProjectilePresetDesc::Kind::PRESSURE_VESSEL, ProjectilePresetDesc::VesselMode::CUSTOM, ng::MPMMaterial::SEALED_CHARGE, 110000.0f, 4.5f * weight_scale, 300.0f, ng::vec4(1.00f, 1.00f, 0.80f, 0.04f),
+                 "Custom weapon — composed from the building blocks in the panel above. Edit blocks, fire, iterate." };
     case ProjectilePreset::STEEL:
     default:
         return { ProjectilePresetDesc::Kind::SINGLE, ProjectilePresetDesc::VesselMode::ROUND, ng::MPMMaterial::THERMO_METAL, g_ball_stiffness, 7.5f * weight_scale, 300.0f, ng::vec4(1.0f),
@@ -2307,7 +2372,8 @@ static void fire_projectile(ng::vec2 origin) {
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::CLAYMORE_CLUSTER ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::LATERAL_CONTACT ||
                     preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN ||
-                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CONCUSSION)) {
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CONCUSSION ||
+                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM)) {
             collect_layered_bomb_layers(origin, g_ball_radius, launch_angle, shape, spacing,
                                         core_positions, core_shell, fuse_positions, fuse_shell,
                                         shell_positions, shell_shell, armor_positions, armor_shell);
@@ -2325,7 +2391,9 @@ static void fire_projectile(ng::vec2 origin) {
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_PAYLOAD ||
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::ROCKET_SIDE_CLAYMORE ||
                    preset.vessel_mode == ProjectilePresetDesc::VesselMode::LATERAL_CONTACT ||
-                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN) {
+                   preset.vessel_mode == ProjectilePresetDesc::VesselMode::PENETRATING_DOWN ||
+                   (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM &&
+                    g_custom_recipe.payload_enabled)) {
             // Claymore-style shrapnel pack. Direction is decided later by the vessel
             // setup (forward / lateral / gravity-snap).
             collect_claymore_payload(origin, g_ball_radius, launch_angle, shape, spacing,
@@ -3204,6 +3272,74 @@ static void fire_projectile(ng::vec2 origin) {
                 vessel.internal_thermal_isolation = true;   // B2
                 vessel.fuse_rest_temp = 440.0f;
                 vessel.core_rest_temp = 290.0f;
+            } else if (preset.vessel_mode == ProjectilePresetDesc::VesselMode::CUSTOM) {
+                // User-built weapon: every parameter is sourced from g_custom_recipe.
+                // No hardcoded tuning here, no "subtle interactions" — what the UI
+                // shows is what the weapon does.
+                const CustomWeaponRecipe& r = g_custom_recipe;
+                shell_material = r.shell_material;
+                shell_stiffness = r.shell_stiffness;
+                shell_density = (r.shell_density) * (glm::max(g_ball_weight, 0.5f) / 6.0f);
+                fuse_stiffness = 22000.0f;
+                fuse_density = 0.90f * (glm::max(g_ball_weight, 0.5f) / 6.0f);
+                core_stiffness = 20000.0f;
+                core_density = 1.10f * (glm::max(g_ball_weight, 0.5f) / 6.0f);
+                fuse_initial_temp = r.fuse_initial_temp;
+                core_initial_temp = r.core_rest_temp;
+                core_thermal = ng::vec4(0.80f, 1.40f, 0.70f, 0.02f);
+                shell_thermal = ng::vec4(0.02f, 0.12f, 1.04f, 0.00f);
+                fuse_thermal = ng::vec4(0.20f, 0.55f, 0.82f, 0.02f);
+
+                vessel.gas_mass = 0.08f;
+                vessel.axis_bias = r.axis_bias;
+                vessel.gas_source_scale = r.gas_source_scale;
+                vessel.rupture_scale = r.rupture_scale;                    // B7
+                vessel.burst_scale = r.burst_scale;                        // B8
+                vessel.shell_push_scale = 0.70f;
+                vessel.core_push_scale = 0.85f;
+                vessel.leak_scale = r.leak_scale;
+                vessel.side_blast_scale = r.side_blast_scale;
+                vessel.plume_push_scale = r.plume_push_scale;              // B8
+                vessel.plume_heat_scale = r.plume_heat_scale;              // B8
+                vessel.plume_radius_scale = 1.0f;
+                vessel.blast_push_scale = r.blast_push_scale;              // B8
+                vessel.blast_heat_scale = r.blast_heat_scale;              // B8
+
+                // B6: propellant
+                if (r.propellant_enabled) {
+                    vessel.nozzle_open = r.nozzle_open;
+                    vessel.thrust_scale = r.thrust_scale;
+                    vessel.propellant_duration = r.propellant_duration;
+                } else {
+                    vessel.nozzle_open = 0.0f;
+                    vessel.thrust_scale = 0.0f;
+                    vessel.propellant_duration = 0.0f;
+                }
+
+                // B2: thermal isolation
+                vessel.internal_thermal_isolation = r.thermal_isolation;
+                vessel.fuse_rest_temp = r.fuse_rest_temp;
+                vessel.core_rest_temp = r.core_rest_temp;
+
+                // B3 + B4 + B5: sensors + delay
+                vessel.impact_rupture = r.impact_rupture;
+                vessel.impact_crack_rate_threshold = r.crack_rate_threshold;
+                vessel.trigger_to_rupture_delay = glm::max(r.delay_ms, 0.0f) * 0.001f;
+                vessel.penetrate_on_impact = r.penetrate_on_impact;
+
+                // B9: payload
+                if (r.payload_enabled) {
+                    vessel.payload_push_scale = r.payload_push_scale;
+                    vessel.payload_cone = r.payload_cone;
+                    vessel.payload_directionality = r.payload_directionality;
+                    payload_material = r.payload_material;
+                    payload_stiffness = r.payload_stiffness;
+                    payload_density = r.payload_density * (glm::max(g_ball_weight, 0.5f) / 6.0f);
+                    payload_initial_temp = 300.0f;
+                    payload_thermal = ng::vec4(0.14f, 0.22f, 1.00f, 0.00f);
+                } else {
+                    vessel.payload_push_scale = 0.0f;
+                }
             }
 
             switch (preset_id) {
@@ -4937,6 +5073,228 @@ static void draw_presets_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     pop_panel_style();
 }
 
+// ---- Custom weapon editor + diagram ----
+//
+// Reads from and writes to g_custom_recipe. Pattern: one CollapsingHeader per
+// building block (B1-B9 + Special), plus a small top panel with a colored
+// cross-section diagram of the current recipe so the user can see at a glance
+// which layers are enabled and how big each one is.
+static void draw_custom_weapon_diagram() {
+    CustomWeaponRecipe& r = g_custom_recipe;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const float total_w = ImGui::GetContentRegionAvail().x - 8.0f;
+    const float bar_h = 36.0f;
+    const float pad = 2.0f;
+    const ImVec2 a(p0.x, p0.y);
+    const ImVec2 b(p0.x + total_w, p0.y + bar_h);
+
+    // Background body
+    dl->AddRectFilled(a, b, IM_COL32(20, 22, 28, 255), 4.0f);
+    dl->AddRect(a, b, IM_COL32(180, 180, 200, 255), 4.0f, 0, 1.5f);
+
+    // Relative widths for each layer. Sizes are clamped so a big thrust doesn't
+    // push the shell off-screen.
+    auto clampw = [](float w) { return glm::clamp(w, 0.0f, 3.5f); };
+    const float w_prop    = r.propellant_enabled ? clampw(0.5f + r.thrust_scale * r.nozzle_open * 0.20f) : 0.0f;
+    const float w_fuse    = 0.6f + r.fuse_initial_temp * 0.001f;
+    const float w_core    = 1.2f + r.burst_scale * 1.1f;
+    const float w_payload = r.payload_enabled ? (0.8f + r.payload_push_scale * 0.12f) : 0.0f;
+    const float w_sum = w_prop + w_fuse + w_core + w_payload + 1e-4f;
+    const float seg_w = (total_w - 4.0f * pad) / w_sum;
+    float cursor = a.x + pad;
+
+    auto band = [&](float w_units, ImU32 col, const char* lbl) {
+        if (w_units <= 0.001f) return;
+        float x0 = cursor;
+        float x1 = cursor + w_units * seg_w;
+        dl->AddRectFilled(ImVec2(x0, a.y + pad), ImVec2(x1, b.y - pad), col, 3.0f);
+        // center label
+        const ImVec2 ts = ImGui::CalcTextSize(lbl);
+        if (x1 - x0 > ts.x + 6.0f) {
+            dl->AddText(ImVec2((x0 + x1) * 0.5f - ts.x * 0.5f, a.y + bar_h * 0.5f - ts.y * 0.5f),
+                        IM_COL32(245, 245, 245, 235), lbl);
+        }
+        cursor = x1 + pad;
+    };
+    band(w_prop,    IM_COL32( 90, 160, 220, 255), "Propel");
+    band(w_fuse,    IM_COL32(230, 170,  60, 255), "Fuse");
+    band(w_core,    IM_COL32(220,  80,  40, 255), "Charge");
+    band(w_payload, IM_COL32(190, 190, 200, 255), "Payload");
+
+    // Contact-sensor tag
+    if (r.impact_rupture) {
+        const char* tag = r.penetrate_on_impact ? "Contact + Down" : "Contact";
+        const ImVec2 ts = ImGui::CalcTextSize(tag);
+        dl->AddText(ImVec2(a.x + 4.0f, b.y + 2.0f), IM_COL32(120, 230, 120, 235), tag);
+    } else {
+        dl->AddText(ImVec2(a.x + 4.0f, b.y + 2.0f), IM_COL32(200, 200, 200, 180), "Pressure-rupture only");
+    }
+
+    ImGui::Dummy(ImVec2(total_w, bar_h + 18.0f));
+}
+
+static const char* shell_material_names[] = {
+    "Stoneware", "Ceramic", "Tough", "Sealed Charge"
+};
+static ng::MPMMaterial shell_material_values[] = {
+    ng::MPMMaterial::STONEWARE,
+    ng::MPMMaterial::CERAMIC,
+    ng::MPMMaterial::TOUGH,
+    ng::MPMMaterial::SEALED_CHARGE
+};
+static const char* payload_material_names[] = {
+    "Thermo-Metal (dense shrapnel)",
+    "Firecracker (bomblets)",
+    "Ceramic (brittle chunks)",
+    "Brittle (light fragments)"
+};
+static ng::MPMMaterial payload_material_values[] = {
+    ng::MPMMaterial::THERMO_METAL,
+    ng::MPMMaterial::FIRECRACKER,
+    ng::MPMMaterial::CERAMIC,
+    ng::MPMMaterial::BRITTLE
+};
+
+static int index_of_material(ng::MPMMaterial m, ng::MPMMaterial* arr, int n) {
+    for (int i = 0; i < n; ++i) if (arr[i] == m) return i;
+    return 0;
+}
+
+static void draw_custom_weapon_editor() {
+    CustomWeaponRecipe& r = g_custom_recipe;
+
+    draw_custom_weapon_diagram();
+
+    if (ImGui::CollapsingHeader("B1 Shell (body)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        int sel = index_of_material(r.shell_material, shell_material_values, 4);
+        if (ImGui::Combo("Material##shell", &sel, shell_material_names, 4)) {
+            r.shell_material = shell_material_values[sel];
+        }
+        ImGui::SliderFloat("Stiffness##shell", &r.shell_stiffness, 20000.0f, 200000.0f, "%.0f");
+        ImGui::SliderFloat("Density scale##shell", &r.shell_density, 1.0f, 10.0f, "%.2f");
+    }
+
+    if (ImGui::CollapsingHeader("B2 Thermal Isolation")) {
+        ImGui::Checkbox("Enabled##isolation", &r.thermal_isolation);
+        ImGui::TextDisabled("One-way cool-down pulls fuse/core temps back toward rest when NOT triggered. Prevents shell impact heat from cooking the charge prematurely.");
+        ImGui::BeginDisabled(!r.thermal_isolation);
+        ImGui::SliderFloat("Fuse rest temp (K)", &r.fuse_rest_temp, 280.0f, 800.0f, "%.0f");
+        ImGui::SliderFloat("Core rest temp (K)", &r.core_rest_temp, 280.0f, 600.0f, "%.0f");
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("B3 / B4 Contact Sensors", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Arm contact sensors##impact", &r.impact_rupture);
+        ImGui::TextDisabled("Enables crack-rate + velocity-drop sensors. If disabled, only pressure can rupture (classic time/heat bomb behavior).");
+        ImGui::BeginDisabled(!r.impact_rupture);
+        ImGui::SliderFloat("Crack rate threshold (crack/s)", &r.crack_rate_threshold, 0.0f, 5.0f, "%.2f");
+        ImGui::TextDisabled("Lower = softer impacts trigger. 1.5 is reliable for hard hits; 0.8 catches gel contacts.");
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("B5 Delay Fuse", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("Delay (ms)", &r.delay_ms, 0.0f, 3000.0f, "%.0f ms");
+        ImGui::TextDisabled("Time between sensor firing and actual rupture. 0-40 ms = contact fuse; 100-300 ms = dig-in; 1000+ ms = slow fuse.");
+    }
+
+    if (ImGui::CollapsingHeader("B6 Propellant")) {
+        ImGui::Checkbox("Enabled##propel", &r.propellant_enabled);
+        ImGui::BeginDisabled(!r.propellant_enabled);
+        ImGui::SliderFloat("Thrust scale", &r.thrust_scale, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderFloat("Nozzle open", &r.nozzle_open, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Burn duration (s)", &r.propellant_duration, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderFloat("Fuse initial temp (K)", &r.fuse_initial_temp, 300.0f, 800.0f, "%.0f");
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("B7 Containment", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("Rupture scale", &r.rupture_scale, 0.5f, 12.0f, "%.2f");
+        ImGui::TextDisabled("Pressure threshold before the shell fails on its own. >6 = basically sealed (only sensors rupture). 1-3 = pressure bomb.");
+    }
+
+    if (ImGui::CollapsingHeader("B8 Blast Character")) {
+        ImGui::SliderFloat("Burst size", &r.burst_scale, 0.0f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Plume push", &r.plume_push_scale, 0.0f, 3.5f, "%.2f");
+        ImGui::SliderFloat("Plume heat", &r.plume_heat_scale, 0.0f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Blast push", &r.blast_push_scale, 0.0f, 3.5f, "%.2f");
+        ImGui::SliderFloat("Blast heat", &r.blast_heat_scale, 0.0f, 3.0f, "%.2f");
+        ImGui::TextDisabled("For a concussion wave: push high, heat low. For incendiary: both high.");
+    }
+
+    if (ImGui::CollapsingHeader("B9 Payload")) {
+        ImGui::Checkbox("Enabled##payload", &r.payload_enabled);
+        ImGui::BeginDisabled(!r.payload_enabled);
+        int psel = index_of_material(r.payload_material, payload_material_values, 4);
+        if (ImGui::Combo("Material##payload", &psel, payload_material_names, 4)) {
+            r.payload_material = payload_material_values[psel];
+        }
+        ImGui::SliderFloat("Payload stiffness", &r.payload_stiffness, 10000.0f, 200000.0f, "%.0f");
+        ImGui::SliderFloat("Payload density", &r.payload_density, 0.5f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Payload push", &r.payload_push_scale, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderFloat("Payload cone (0=wide, 1=tight)", &r.payload_cone, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Directionality (0=radial, 1=forward)", &r.payload_directionality, 0.0f, 1.0f, "%.2f");
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("Special")) {
+        ImGui::Checkbox("Penetrate on impact (snap burst to gravity)", &r.penetrate_on_impact);
+        ImGui::SliderFloat("Side blast scale", &r.side_blast_scale, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Axis bias (1=forward, 0=radial)", &r.axis_bias, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Gas source scale", &r.gas_source_scale, 0.1f, 2.0f, "%.2f");
+        ImGui::SliderFloat("Leak scale", &r.leak_scale, 0.2f, 4.0f, "%.2f");
+    }
+
+    // Presets / shortcuts for quickly setting up common bomb archetypes
+    ImGui::Separator();
+    ImGui::TextDisabled("Load a starting recipe:");
+    if (ImGui::Button("Contact Charge")) {
+        r = CustomWeaponRecipe{};
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Impact Rocket")) {
+        r = CustomWeaponRecipe{};
+        r.propellant_enabled = true;
+        r.thrust_scale = 5.2f;
+        r.nozzle_open = 0.50f;
+        r.propellant_duration = 2.5f;
+        r.fuse_initial_temp = 490.0f;
+        r.fuse_rest_temp = 490.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Penetrator")) {
+        r = CustomWeaponRecipe{};
+        r.penetrate_on_impact = true;
+        r.crack_rate_threshold = 1.8f;
+        r.delay_ms = 120.0f;
+        r.shell_density = 5.6f;
+        r.payload_density = 7.2f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Concussion")) {
+        r = CustomWeaponRecipe{};
+        r.payload_enabled = false;
+        r.burst_scale = 1.50f;
+        r.plume_push_scale = 2.50f;
+        r.plume_heat_scale = 0.20f;
+        r.blast_push_scale = 2.80f;
+        r.blast_heat_scale = 0.15f;
+        r.delay_ms = 20.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Slow Pipe Bomb")) {
+        r = CustomWeaponRecipe{};
+        r.impact_rupture = false;      // no contact trigger — pressure only
+        r.crack_rate_threshold = 0.0f;
+        r.rupture_scale = 2.20f;       // low containment so gas ruptures it
+        r.gas_source_scale = 0.90f;
+        r.leak_scale = 0.50f;
+        r.fuse_initial_temp = 620.0f;
+        r.thermal_isolation = false;
+        r.delay_ms = 0.0f;
+    }
+}
+
 static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
     if (!g_show_interaction_window) return;
 
@@ -5065,9 +5423,13 @@ static void draw_interaction_window(ImVec2 pos, ImVec2 size, ImVec4 accent) {
                 "Claymore + Cluster",
                 "Side Burst (Contact)",
                 "Gravity Penetrator (Contact)",
-                "Concussion Charge (Contact)"
+                "Concussion Charge (Contact)",
+                "Custom (Configure Blocks)"
             };
-            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 9);
+            ImGui::Combo("Weapon", &g_launcher2_preset, launcher2_names, 10);
+            if (g_launcher2_preset == 9) {
+                draw_custom_weapon_editor();
+            }
             ProjectilePresetDesc ui_preset = current_projectile_preset();
             if (ui_preset.kind != ProjectilePresetDesc::Kind::SINGLE) {
                 ImGui::Checkbox("Auto-Arm on Launch", &g_projectile_auto_arm);
