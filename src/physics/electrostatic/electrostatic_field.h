@@ -53,7 +53,7 @@ public:
 
     void step(const SDFField& sdf, ParticleBuffer* particles = nullptr);
 
-    void bind_field_for_read(u32 unit = 5) const;
+    void bind_field_for_read(u32 unit = 10) const;
     void bind_charge_ssbo(u32 binding) const;
 
     // Seed per-particle charge at the given global particle index range.
