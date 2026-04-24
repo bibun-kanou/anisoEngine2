@@ -42,9 +42,16 @@ enum class SceneID : u32 {
     FIX_TEST_BIO_HEAL=90, FIX_TEST_BLAST_COOLDOWN=91,
     FIX_TEST_COLLISION_HEAT=92, FIX_TEST_FERRO_DEMAG=93,
     FIX_TEST_SPH_EQUIL=94,
-    HUGE_WEAPON_RANGE=95, HUGE_IMPACT_PLAYGROUND=96
+    HUGE_WEAPON_RANGE=95, HUGE_IMPACT_PLAYGROUND=96,
+    // --- Showcase scenes for the latest physics additions ---
+    SHOWCASE_FERRO_VARIANTS=97,  // 4 ferrofluid variants side-by-side under one magnet
+    SHOWCASE_MEISSNER_FLOAT=98,  // cold superconductor block levitating over a magnet
+    SHOWCASE_CURIE_DEMAG=99,     // Curie ferromagnet bar that loses M when heated
+    SHOWCASE_SAND_CASTLE=100,    // Drucker-Prager sand angle-of-repose pile
+    SHOWCASE_ION_CROSSFLOW=101,  // positive + negative ion clouds driven by ambient E
+    SHOWCASE_PHASE_FRACTURE=102  // phase-field brittle tile under heavy-ball impact
 };
-constexpr int SCENE_COUNT = 97;
+constexpr int SCENE_COUNT = 103;
 inline const char* scene_names[] = {
     "Default", "Thermal Furnace", "Fracture Test", "Melting",
     "Dam Break", "Stiff Objects", "Heat Ramp", "Fire & Forge",
@@ -87,7 +94,13 @@ inline const char* scene_names[] = {
     "Fix Test: Ferro Demag Spikes [new]",
     "Fix Test: SPH Thermal Equilibrium [new]",
     "Huge Weapon Range [new]",
-    "Huge Impact Playground [new]"
+    "Huge Impact Playground [new]",
+    "Showcase: Ferro Variants [new]",
+    "Showcase: Meissner Float [new]",
+    "Showcase: Curie Demag [new]",
+    "Showcase: Sand Castle [new]",
+    "Showcase: Ion Crossflow [new]",
+    "Showcase: Phase Fracture [new]"
 };
 
 void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,

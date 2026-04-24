@@ -5303,6 +5303,284 @@ static void load_huge_impact_playground(ParticleBuffer& particles, SPHSolver& sp
     mpm.params().youngs_modulus = old_E;
 }
 
+// ==========================================================================
+// Showcase scenes for the latest physics additions. Each one isolates a
+// single new feature so it's visible as soon as the scene loads, with a
+// description telling the user what to expect and which UI toggle to flip.
+// ==========================================================================
+
+static void load_showcase_ferro_variants(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                         MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                         CreationState* creation) {
+    // Four ferrofluid variants side by side under a central Y-pole magnet.
+    // Identical starting puddles reveal their different constitutive
+    // responses to the same applied field. Turn on Ambient Field (strength
+    // 3-5, angle 90°) in Environment > Overlays to see the full spread of
+    // behaviors; hold M over any puddle to watch them differ under a
+    // cursor source too.
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.30f, -1.30f), vec2(2.30f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                    "Bench Plate", "Comparison bench — identical puddles under one shared magnet.");
+    sdf.add_box(vec2(0.0f, -1.05f), vec2(0.35f, 0.40f),
+                SDFField::MaterialPresetID::MAGNET_Y,
+                "Central Pole",
+                "Single upward-pointing permanent magnet. All four puddles feel this same field so their differences come from the constitutive model.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = false;
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+    mpm.params().youngs_modulus = 4200.0f;
+
+    struct Sample {
+        vec2 min, max;
+        MPMMaterial material;
+        const char* label;
+        const char* expected;
+        f32 density_scale;
+    };
+    const Sample samples[] = {
+        {{-1.85f, -0.80f}, {-1.35f, -0.55f}, MPMMaterial::FERRO_FLUID,
+         "Classic Ferrofluid",
+         "Baseline spikes + subtle cursor pull. Compare with the heavy variant to the right.", 1.0f},
+        {{-0.70f, -0.80f}, {-0.20f, -0.55f}, MPMMaterial::HEAVY_FERRO_FLUID,
+         "Heavy Ferrofluid",
+         "Tall Rosensweig spikes, climbs toward the magnet. Visibly more dramatic than the regular one.", 1.15f},
+        {{ 0.35f, -0.80f}, { 0.85f, -0.55f}, MPMMaterial::DIAMAGNETIC_FLUID,
+         "Diamagnetic Fluid",
+         "Negative chi — should POOL AT THE EDGE of the field region instead of over the magnet. Watch it retreat as you crank Ambient Field.", 0.65f},
+        {{ 1.25f, -0.80f}, { 1.75f, -0.55f}, MPMMaterial::STICKY_FERRO,
+         "Sticky Ferrofluid",
+         "High-cohesion — moves as a compact dark blob instead of spiking. Expect a slow-sliding glob toward the pole.", 1.25f},
+    };
+    for (const Sample& s : samples) {
+        u32 before = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, s.min, s.max, sp, s.material, 300.0f, vec2(1, 0), s.density_scale);
+        register_scene_mpm_batch(creation, s.label, s.expected,
+                                 particles, before, s.material,
+                                 4200.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), s.density_scale);
+    }
+    mpm.params().youngs_modulus = old_E;
+}
+
+static void load_showcase_meissner_float(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                         MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                         CreationState* creation) {
+    // Cold superconductor block sitting just above a permanent magnet.
+    // Below T_c ~180K the block is a perfect diamagnet — Meissner effect
+    // expels the field, creating a pressure pillow that can levitate the
+    // block. Heat it with G to destroy the superconducting state and watch
+    // it drop onto the magnet.
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.10f, -1.30f), vec2(2.10f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                    "Bench Plate", "Cold plate — wide magnet below, cryo block suspended above.");
+    sdf.add_box(vec2(0.0f, -1.05f), vec2(1.30f, 0.25f),
+                SDFField::MaterialPresetID::MAGNET_Y,
+                "Wide Pole Magnet",
+                "Broad upward-pointing magnet — the vertical component of its field dominates the region directly above it.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+    mpm.params().youngs_modulus = 32000.0f;
+
+    // Cold superconductor tile hanging a short distance above the magnet.
+    // 120K is comfortably below the 180K critical temperature so the
+    // Meissner branch fully engages on the first frame.
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-0.40f, 0.04f), vec2(0.40f, 0.22f), sp,
+                    MPMMaterial::SUPERCONDUCTOR, 120.0f, vec2(1, 0), 1.0f);
+    register_scene_mpm_batch(creation,
+                             "Supercooled Plate (120K)",
+                             "Expected: with Real Magnetics enabled, this plate should be PUSHED AWAY from the magnet below (field-expulsion pressure) — it may rise slightly or hang stable instead of falling. Heat it past 180K with G and the Meissner state dies, plate drops onto the magnet.",
+                             particles, before, MPMMaterial::SUPERCONDUCTOR,
+                             32000.0f, mpm.params().poisson_ratio, 120.0f, vec2(1, 0), 1.0f);
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+static void load_showcase_curie_demag(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                      MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                      CreationState* creation) {
+    // Two puddles of ferrofluid on either side of a hanging Curie-ferro
+    // bar. Cold, the bar is a strong ferromagnet and pulls both puddles
+    // toward itself. Heat the bar past T_Curie ~680K (hold G on it) and
+    // the magnetism dies — puddles should relax back to flat pools.
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.10f, -1.30f), vec2(2.10f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                    "Bench Plate", "Curie-transition demo — cold magnet below, heat source kills it.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = true;
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+
+    // Curie ferro bar — starts at 320K (well below T_Curie=680K) so it's
+    // fully ferromagnetic and pulls the flanking puddles.
+    mpm.params().youngs_modulus = 22000.0f;
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-0.18f, -0.28f), vec2(0.18f, 0.36f), sp,
+                    MPMMaterial::CURIE_FERRO, 320.0f, vec2(0, 1), 1.1f);
+    register_scene_mpm_batch(creation,
+                             "Curie Ferro Bar (cold)",
+                             "Expected: this iron-grey bar starts cold and magnetized. Heat it with G until it crosses 680K — its magnetism dies, puddles stop being pulled, and if the bar is cool again it regains M.",
+                             particles, before, MPMMaterial::CURIE_FERRO,
+                             22000.0f, mpm.params().poisson_ratio, 320.0f, vec2(0, 1), 1.1f);
+
+    // Flanking ferrofluid puddles.
+    mpm.params().youngs_modulus = 4200.0f;
+    for (f32 x : {-0.95f, 0.95f}) {
+        u32 bf = particles.range(SolverType::MPM).count;
+        mpm.spawn_block(particles, vec2(x - 0.24f, -0.80f), vec2(x + 0.24f, -0.58f), sp,
+                        MPMMaterial::FERRO_FLUID, 300.0f, vec2(1, 0), 1.0f);
+        register_scene_mpm_batch(creation,
+                                 "Witness Ferro Puddle",
+                                 "These two puddles are indicators for the Curie bar's state. When it's cold they creep / spike toward the bar. Heat the bar past 680K and they should relax flat again.",
+                                 particles, bf, MPMMaterial::FERRO_FLUID,
+                                 4200.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
+    }
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+static void load_showcase_sand_castle(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                      MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                      CreationState* creation) {
+    // A tall loose pile of Drucker-Prager sand with a hopper above it.
+    // Real angle of repose should emerge (~35° friction cone) — the pile
+    // settles into a cone shape rather than flattening like a fluid. Drop
+    // a heavy elastic ball onto it to see it avalanche.
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.20f, -1.30f), vec2(2.20f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                    "Sand Plate", "Flat plate — sand pile forms its own angle of repose here.");
+    // Two angled ramps on the sides to funnel sand into the center.
+    sdf.add_segment(vec2(-1.80f, -0.20f), vec2(-0.50f, -1.20f), 0.06f,
+                    SDFField::MaterialPresetID::BRONZE_BALANCED,
+                    "Left Ramp", "Angled ramp to let sand slide into the central pile.");
+    sdf.add_segment(vec2( 1.80f, -0.20f), vec2( 0.50f, -1.20f), 0.06f,
+                    SDFField::MaterialPresetID::BRONZE_BALANCED,
+                    "Right Ramp", "Mirror of the left ramp.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = false;
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+    mpm.params().youngs_modulus = 7200.0f;
+
+    // Tall sand column spanning the central region.
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-0.42f, -1.20f), vec2(0.42f, 0.90f), sp,
+                    MPMMaterial::SAND_GRANULAR, 300.0f, vec2(1, 0), 1.0f);
+    register_scene_mpm_batch(creation,
+                             "Granular Sand Pile",
+                             "Expected: as the column settles, it should spread into a 35° cone — NOT a flat puddle like a fluid. Drop an elastic ball on the pile from above (Creation Menu) to see a realistic avalanche.",
+                             particles, before, MPMMaterial::SAND_GRANULAR,
+                             7200.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+static void load_showcase_ion_crossflow(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                        MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                        CreationState* creation) {
+    // Positive ion cloud on the left, negative on the right. With Ambient
+    // E-field on (angle 0° = +X), positives stream right while negatives
+    // stream left; they meet in the middle. Flip the angle to 180° and
+    // they reverse.
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.20f, -1.30f), vec2(2.20f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                    "Bench Plate", "Dielectric bench — ions fly over this without friction.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = false;
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+    mpm.params().youngs_modulus = 900.0f;
+
+    // Positive cloud on the far left.
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-1.90f, -0.90f), vec2(-1.40f, -0.40f), sp,
+                    MPMMaterial::POSITIVE_ION, 300.0f, vec2(1, 0), 0.40f);
+    register_scene_mpm_batch(creation,
+                             "Positive Ion Cloud (q=+1)",
+                             "Expected: enable Ambient E-field in Environment > Overlays and set Angle=0° — this warm cloud flows RIGHT toward the negatives.",
+                             particles, before, MPMMaterial::POSITIVE_ION,
+                             900.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.40f);
+
+    // Negative cloud on the far right.
+    before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(1.40f, -0.90f), vec2(1.90f, -0.40f), sp,
+                    MPMMaterial::NEGATIVE_ION, 300.0f, vec2(1, 0), 0.40f);
+    register_scene_mpm_batch(creation,
+                             "Negative Ion Cloud (q=-1)",
+                             "Expected: this cool cloud flows LEFT against the same ambient E — it has opposite charge. The two clouds should meet near the middle.",
+                             particles, before, MPMMaterial::NEGATIVE_ION,
+                             900.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.40f);
+
+    mpm.params().youngs_modulus = old_E;
+}
+
+static void load_showcase_phase_fracture(ParticleBuffer& particles, SPHSolver& /*sph*/,
+                                         MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
+                                         CreationState* creation) {
+    // A phase-field brittle ceramic tile supported at both ends with a
+    // heavy elastic ball hovering above. Ball drops on the tile → cracks
+    // propagate from the impact zone along high-energy paths rather than
+    // smearing uniformly. Characteristic crack branching behavior.
+    sdf.clear();
+    add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
+    sdf.add_segment(vec2(-2.10f, -1.30f), vec2(2.10f, -1.30f), 0.10f,
+                    SDFField::MaterialPresetID::BRASS_HEAT_SINK,
+                    "Floor Plate", "Catches the ceramic shards after the tile breaks.");
+    // Two thin rigid supports that hold the ceramic tile up like a bridge.
+    sdf.add_box(vec2(-1.05f, -0.96f), vec2(0.12f, 0.40f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Left Support", "Rigid pier — holds the tile's left end.");
+    sdf.add_box(vec2( 1.05f, -0.96f), vec2(0.12f, 0.40f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Right Support", "Rigid pier — holds the tile's right end.");
+    sdf.rebuild();
+
+    mpm.params().enable_thermal = false;
+    const f32 sp = grid.dx() * 0.5f;
+    const f32 old_E = mpm.params().youngs_modulus;
+    mpm.params().youngs_modulus = 14000.0f;
+
+    // The ceramic tile spanning the two supports.
+    u32 before = particles.range(SolverType::MPM).count;
+    mpm.spawn_block(particles, vec2(-0.95f, -0.48f), vec2(0.95f, -0.32f), sp,
+                    MPMMaterial::PHASE_BRITTLE, 300.0f, vec2(1, 0), 1.0f);
+    register_scene_mpm_batch(creation,
+                             "Brittle Ceramic Bridge",
+                             "Expected: when the heavy ball lands on this, cracks should propagate cleanly from the impact zone outward — quadratic stress degradation (1-d)^2 means cracked regions release their stored energy instead of smearing.",
+                             particles, before, MPMMaterial::PHASE_BRITTLE,
+                             14000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
+
+    // Heavy impactor ball above.
+    mpm.params().youngs_modulus = 80000.0f;
+    before = particles.range(SolverType::MPM).count;
+    mpm.spawn_circle(particles, vec2(0.0f, 0.85f), 0.20f, sp,
+                     MPMMaterial::TOUGH, 300.0f, vec2(1, 0), 2.6f);
+    register_scene_mpm_batch(creation,
+                             "Impactor Ball",
+                             "Heavy elastic ball suspended above the bridge. Let it fall — watch the tile fracture.",
+                             particles, before, MPMMaterial::TOUGH,
+                             80000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 2.6f);
+
+    mpm.params().youngs_modulus = old_E;
+}
+
 // ---- dispatch ----
 void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
                 MPMSolver& mpm, UniformGrid& grid, SDFField& sdf,
@@ -5606,6 +5884,24 @@ void load_scene(SceneID id, ParticleBuffer& particles, SPHSolver& sph,
         break;
     case SceneID::HUGE_IMPACT_PLAYGROUND:
         load_huge_impact_playground(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::SHOWCASE_FERRO_VARIANTS:
+        load_showcase_ferro_variants(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::SHOWCASE_MEISSNER_FLOAT:
+        load_showcase_meissner_float(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::SHOWCASE_CURIE_DEMAG:
+        load_showcase_curie_demag(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::SHOWCASE_SAND_CASTLE:
+        load_showcase_sand_castle(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::SHOWCASE_ION_CROSSFLOW:
+        load_showcase_ion_crossflow(particles, sph, mpm, grid, sdf, creation);
+        break;
+    case SceneID::SHOWCASE_PHASE_FRACTURE:
+        load_showcase_phase_fracture(particles, sph, mpm, grid, sdf, creation);
         break;
     }
 }
