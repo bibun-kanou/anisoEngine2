@@ -61,6 +61,9 @@ void ElectrostaticField::init(const Config& config) {
     // Poisson, whether the potential is magnetic or electric.
     jacobi_shader_.load("shaders/physics/magnetic_jacobi.comp");
     field_shader_.load("shaders/physics/magnetic_field.comp");
+    // Dedicated Coulomb-force pass — narrow SSBO set so it fits under the
+    // driver cap without having to share mpm_g2p's.
+    force_shader_.load("shaders/physics/electrostatic_force.comp");
 
     // Zero textures so a first-frame overlay reads sane data.
     const float zero = 0.0f;
@@ -156,6 +159,29 @@ void ElectrostaticField::bind_charge_ssbo(u32 binding) const {
 void ElectrostaticField::init_charges(u32 global_offset, const f32* values, u32 count) {
     if (count == 0 || !values) return;
     particle_charge_buf_.upload(values, count * sizeof(f32), global_offset * sizeof(f32));
+}
+
+void ElectrostaticField::apply_coulomb_force(ParticleBuffer& particles, f32 dt) {
+    if (!active() || dt <= 1e-6f) return;
+    const auto& range = particles.range(SolverType::MPM);
+    if (range.count == 0) return;
+
+    particles.positions().bind_base(Binding::POSITION);
+    particles.velocities().bind_base(Binding::VELOCITY);
+    particles.material_ids().bind_base(Binding::MATERIAL_ID);
+    particle_charge_buf_.bind_base(kParticleChargeBinding);
+
+    glBindTextureUnit(0, e_field_tex_);
+    force_shader_.bind();
+    force_shader_.set_int("u_e_field_tex", 0);
+    force_shader_.set_uint("u_offset", range.offset);
+    force_shader_.set_uint("u_count", range.count);
+    force_shader_.set_vec2("u_world_min", world_min_);
+    force_shader_.set_vec2("u_world_max", world_max_);
+    force_shader_.set_float("u_force_scale", params_.force_scale);
+    force_shader_.set_float("u_dt", dt);
+    force_shader_.dispatch_1d(range.count);
+    ComputeShader::barrier_ssbo();
 }
 
 } // namespace ng

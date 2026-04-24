@@ -74,6 +74,12 @@ public:
     void bind_field_for_read(u32 unit = 4) const;
     void bind_total_field_for_read(u32 unit = 4) const;
     void bind_magnetization_for_read(u32 unit = 4) const;
+
+    // True iff any SDF object in the scene has a nonzero magnetic mode.
+    // Used by the Kelvin-force external-drive gate: when Real Magnetics is
+    // on but no actual scene magnets exist, we still want the particle
+    // self-feedback safety damping active.
+    bool has_scene_magnet_sources() const { return scene_magnet_count_ > 0; }
     // Bind the per-particle persistent magnetization buffer to a given
     // SSBO binding. Used by mpm_g2p.comp to read M_prev for the
     // anisotropic dipole-dipole force (chain formation).
@@ -117,6 +123,9 @@ private:
 
     u32 magnetization_tex_ = 0;
     u32 source_tex_ = 0;
+    // Cached after each upload_object_magnetics() — zero when no SDF object
+    // has a magnetic mode active.
+    u32 scene_magnet_count_ = 0;
     u32 phi_tex_ = 0;
     u32 phi2_tex_ = 0;
     u32 drive_field_tex_ = 0;

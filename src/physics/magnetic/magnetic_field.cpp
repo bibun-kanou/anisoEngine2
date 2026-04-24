@@ -105,10 +105,12 @@ void MagneticField::upload_object_magnetics(const SDFField& sdf) {
     if (objects.empty()) {
         ObjectMagneticGPU dummy{};
         object_buffer_.upload(&dummy, sizeof(dummy));
+        scene_magnet_count_ = 0;
         return;
     }
 
     std::vector<ObjectMagneticGPU> gpu(objects.size());
+    u32 active_sources = 0;
     for (size_t i = 0; i < objects.size(); ++i) {
         const auto& material = objects[i].material;
         auto& dst = gpu[i];
@@ -118,7 +120,16 @@ void MagneticField::upload_object_magnetics(const SDFField& sdf) {
         vec2 dir = material.magnetic_dir;
         if (glm::length(dir) < 1e-5f) dir = vec2(1.0f, 0.0f);
         dst.dir = glm::normalize(dir);
+        // Only count objects that are actually magnetic sources (mode != NONE)
+        // AND have meaningful strength or susceptibility. This is the signal
+        // the Kelvin-force gate uses to decide whether Real Magnetics has an
+        // actual source for ferro to respond to.
+        if (dst.mode != 0u &&
+            (std::abs(dst.strength) > 1e-4f || std::abs(dst.susceptibility) > 1e-4f)) {
+            active_sources++;
+        }
     }
+    scene_magnet_count_ = active_sources;
 
     const size_t bytes = gpu.size() * sizeof(ObjectMagneticGPU);
     if (bytes > object_buffer_.size()) {

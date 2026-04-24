@@ -5459,16 +5459,18 @@ static void load_showcase_sand_castle(ParticleBuffer& particles, SPHSolver& /*sp
     // a heavy elastic ball onto it to see it avalanche.
     sdf.clear();
     add_floor_and_walls(sdf, SDFField::MaterialPresetID::BRONZE_BALANCED);
-    sdf.add_segment(vec2(-2.20f, -1.30f), vec2(2.20f, -1.30f), 0.10f,
+    sdf.add_segment(vec2(-2.30f, -1.30f), vec2(2.30f, -1.30f), 0.10f,
                     SDFField::MaterialPresetID::BRASS_HEAT_SINK,
                     "Sand Plate", "Flat plate — sand pile forms its own angle of repose here.");
-    // Two angled ramps on the sides to funnel sand into the center.
-    sdf.add_segment(vec2(-1.80f, -0.20f), vec2(-0.50f, -1.20f), 0.06f,
+    // Low angled side walls containing the pile from the very far edges
+    // only. The sand needs a WIDE base to form a visible cone, so we leave
+    // the central 3m entirely open.
+    sdf.add_segment(vec2(-2.30f, -0.50f), vec2(-1.50f, -1.20f), 0.06f,
                     SDFField::MaterialPresetID::BRONZE_BALANCED,
-                    "Left Ramp", "Angled ramp to let sand slide into the central pile.");
-    sdf.add_segment(vec2( 1.80f, -0.20f), vec2( 0.50f, -1.20f), 0.06f,
+                    "Left Edge Ramp", "Guides any sand that bounces sideways back toward the central pile.");
+    sdf.add_segment(vec2( 2.30f, -0.50f), vec2( 1.50f, -1.20f), 0.06f,
                     SDFField::MaterialPresetID::BRONZE_BALANCED,
-                    "Right Ramp", "Mirror of the left ramp.");
+                    "Right Edge Ramp", "Mirror of the left edge.");
     sdf.rebuild();
 
     mpm.params().enable_thermal = false;
@@ -5476,13 +5478,17 @@ static void load_showcase_sand_castle(ParticleBuffer& particles, SPHSolver& /*sp
     const f32 old_E = mpm.params().youngs_modulus;
     mpm.params().youngs_modulus = 7200.0f;
 
-    // Tall sand column spanning the central region.
+    // WIDE sand reservoir — 3m base, 2m tall. When gravity pulls this down
+    // onto a flat plate it has room to spread into a proper ~35° friction
+    // cone that's actually visible at this camera distance. If the user
+    // sees something that looks flat, the fix is almost always "need more
+    // sand" — not "Drucker-Prager is broken".
     u32 before = particles.range(SolverType::MPM).count;
-    mpm.spawn_block(particles, vec2(-0.42f, -1.20f), vec2(0.42f, 0.90f), sp,
+    mpm.spawn_block(particles, vec2(-1.50f, -1.20f), vec2(1.50f, 0.80f), sp,
                     MPMMaterial::SAND_GRANULAR, 300.0f, vec2(1, 0), 1.0f);
     register_scene_mpm_batch(creation,
-                             "Granular Sand Pile",
-                             "Expected: as the column settles, it should spread into a 35° cone — NOT a flat puddle like a fluid. Drop an elastic ball on the pile from above (Creation Menu) to see a realistic avalanche.",
+                             "Granular Sand Reservoir",
+                             "Expected: as the reservoir settles, the top surface should be visibly SLOPED (~35° friction cone on each side) — NOT flat like a fluid. Drop an elastic ball on top from the Creation Menu to trigger a realistic avalanche down the slopes.",
                              particles, before, MPMMaterial::SAND_GRANULAR,
                              7200.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
 
@@ -5501,6 +5507,15 @@ static void load_showcase_ion_crossflow(ParticleBuffer& particles, SPHSolver& /*
     sdf.add_segment(vec2(-2.20f, -1.30f), vec2(2.20f, -1.30f), 0.10f,
                     SDFField::MaterialPresetID::BRASS_HEAT_SINK,
                     "Bench Plate", "Dielectric bench — ions fly over this without friction.");
+    // Two SDF 'electrode' plates — purely cosmetic; show where the ambient
+    // E is pointing. They don't affect the field (no magnetic/electric
+    // mode set), just visual context.
+    sdf.add_box(vec2(-2.05f, 0.10f), vec2(0.10f, 0.90f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Left Electrode (cathode)", "Visual marker. The user-enabled Ambient E-field points from here toward the right electrode when Angle=0.");
+    sdf.add_box(vec2( 2.05f, 0.10f), vec2(0.10f, 0.90f),
+                SDFField::MaterialPresetID::BRONZE_BALANCED,
+                "Right Electrode (anode)", "Visual marker for the Ambient E-field's +x direction.");
     sdf.rebuild();
 
     mpm.params().enable_thermal = false;
@@ -5508,25 +5523,25 @@ static void load_showcase_ion_crossflow(ParticleBuffer& particles, SPHSolver& /*
     const f32 old_E = mpm.params().youngs_modulus;
     mpm.params().youngs_modulus = 900.0f;
 
-    // Positive cloud on the far left.
+    // Positive cloud floating mid-left.
     u32 before = particles.range(SolverType::MPM).count;
-    mpm.spawn_block(particles, vec2(-1.90f, -0.90f), vec2(-1.40f, -0.40f), sp,
-                    MPMMaterial::POSITIVE_ION, 300.0f, vec2(1, 0), 0.40f);
+    mpm.spawn_block(particles, vec2(-1.80f, 0.10f), vec2(-1.30f, 0.60f), sp,
+                    MPMMaterial::POSITIVE_ION, 300.0f, vec2(1, 0), 0.25f);
     register_scene_mpm_batch(creation,
                              "Positive Ion Cloud (q=+1)",
-                             "Expected: enable Ambient E-field in Environment > Overlays and set Angle=0° — this warm cloud flows RIGHT toward the negatives.",
+                             "Expected: open Environment > Overlays / Debug and turn on 'Ambient E-field'. At default angle 90 deg the E points up, so these warm positives rise. Change the angle to 0 deg (right) and they'll stream toward the right electrode instead. Without any ambient E they just fall as a light gas.",
                              particles, before, MPMMaterial::POSITIVE_ION,
-                             900.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.40f);
+                             900.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.25f);
 
-    // Negative cloud on the far right.
+    // Negative cloud floating mid-right.
     before = particles.range(SolverType::MPM).count;
-    mpm.spawn_block(particles, vec2(1.40f, -0.90f), vec2(1.90f, -0.40f), sp,
-                    MPMMaterial::NEGATIVE_ION, 300.0f, vec2(1, 0), 0.40f);
+    mpm.spawn_block(particles, vec2(1.30f, 0.10f), vec2(1.80f, 0.60f), sp,
+                    MPMMaterial::NEGATIVE_ION, 300.0f, vec2(1, 0), 0.25f);
     register_scene_mpm_batch(creation,
                              "Negative Ion Cloud (q=-1)",
-                             "Expected: this cool cloud flows LEFT against the same ambient E — it has opposite charge. The two clouds should meet near the middle.",
+                             "Expected: mirror of the positive cloud. At Ambient E angle 0 (right) these cool negatives flow LEFT against the field — toward the left electrode / toward the positives. At angle 90 (up) they stream DOWN instead.",
                              particles, before, MPMMaterial::NEGATIVE_ION,
-                             900.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.40f);
+                             900.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 0.25f);
 
     mpm.params().youngs_modulus = old_E;
 }
@@ -5544,10 +5559,12 @@ static void load_showcase_phase_fracture(ParticleBuffer& particles, SPHSolver& /
                     SDFField::MaterialPresetID::BRASS_HEAT_SINK,
                     "Floor Plate", "Catches the ceramic shards after the tile breaks.");
     // Two thin rigid supports that hold the ceramic tile up like a bridge.
-    sdf.add_box(vec2(-1.05f, -0.96f), vec2(0.12f, 0.40f),
+    // Taller piers so the tile clearly rests ON them, not hanging in the
+    // air above. Pier top at y=-0.40.
+    sdf.add_box(vec2(-1.05f, -0.85f), vec2(0.14f, 0.45f),
                 SDFField::MaterialPresetID::BRONZE_BALANCED,
                 "Left Support", "Rigid pier — holds the tile's left end.");
-    sdf.add_box(vec2( 1.05f, -0.96f), vec2(0.12f, 0.40f),
+    sdf.add_box(vec2( 1.05f, -0.85f), vec2(0.14f, 0.45f),
                 SDFField::MaterialPresetID::BRONZE_BALANCED,
                 "Right Support", "Rigid pier — holds the tile's right end.");
     sdf.rebuild();
@@ -5555,22 +5572,23 @@ static void load_showcase_phase_fracture(ParticleBuffer& particles, SPHSolver& /
     mpm.params().enable_thermal = false;
     const f32 sp = grid.dx() * 0.5f;
     const f32 old_E = mpm.params().youngs_modulus;
-    mpm.params().youngs_modulus = 14000.0f;
+    mpm.params().youngs_modulus = 40000.0f; // stiffer ceramic — resists sag, cracks on impact
 
-    // The ceramic tile spanning the two supports.
+    // Ceramic tile: bottom at y = -0.38, just above pier top at y = -0.40
+    // so the tile rests with a small sinkage. Span 2.10m, thickness 0.12m.
     u32 before = particles.range(SolverType::MPM).count;
-    mpm.spawn_block(particles, vec2(-0.95f, -0.48f), vec2(0.95f, -0.32f), sp,
+    mpm.spawn_block(particles, vec2(-1.05f, -0.38f), vec2(1.05f, -0.26f), sp,
                     MPMMaterial::PHASE_BRITTLE, 300.0f, vec2(1, 0), 1.0f);
     register_scene_mpm_batch(creation,
                              "Brittle Ceramic Bridge",
-                             "Expected: when the heavy ball lands on this, cracks should propagate cleanly from the impact zone outward — quadratic stress degradation (1-d)^2 means cracked regions release their stored energy instead of smearing.",
+                             "Expected: spans the two piers, supported at both ends. When the heavy ball lands in the middle, cracks should propagate cleanly from the impact zone outward along stressed fibers — quadratic stress degradation (1-d)^2 means cracked regions actually release their stored energy.",
                              particles, before, MPMMaterial::PHASE_BRITTLE,
-                             14000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
+                             40000.0f, mpm.params().poisson_ratio, 300.0f, vec2(1, 0), 1.0f);
 
     // Heavy impactor ball above.
     mpm.params().youngs_modulus = 80000.0f;
     before = particles.range(SolverType::MPM).count;
-    mpm.spawn_circle(particles, vec2(0.0f, 0.85f), 0.20f, sp,
+    mpm.spawn_circle(particles, vec2(0.0f, 0.55f), 0.16f, sp,
                      MPMMaterial::TOUGH, 300.0f, vec2(1, 0), 2.6f);
     register_scene_mpm_batch(creation,
                              "Impactor Ball",

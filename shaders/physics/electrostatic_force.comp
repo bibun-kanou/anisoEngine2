@@ -1,0 +1,58 @@
+#version 450 core
+
+// Applies the electrostatic Coulomb force F = qE to charged MPM particles,
+// as a post-g2p pass. Separate from mpm_g2p.comp because that shader is
+// already at the 16-SSBO cap on common drivers; this one only declares
+// the handful of SSBOs it actually needs.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Positions  { vec2 positions[]; };
+layout(std430, binding = 1) buffer          Velocities { vec2 velocities[]; };
+layout(std430, binding = 7) readonly buffer MatIDs     { uint material_ids[]; };
+layout(std430, binding = 24) readonly buffer Charges   { float particle_charge[]; };
+
+layout(binding = 0) uniform sampler2D u_e_field_tex;
+
+uniform uint  u_offset;
+uniform uint  u_count;
+uniform vec2  u_world_min;
+uniform vec2  u_world_max;
+uniform float u_force_scale;
+uniform float u_dt;
+
+// Keep in sync with charge_rasterize.comp and creation_menu.cpp.
+const uint MAT_POSITIVE_ION   = 77u;
+const uint MAT_NEGATIVE_ION   = 78u;
+const uint MAT_TRIBOELECTRIC  = 79u;
+
+bool is_charged(uint mat) {
+    return mat == MAT_POSITIVE_ION || mat == MAT_NEGATIVE_ION || mat == MAT_TRIBOELECTRIC;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    uint mat = material_ids[p];
+    if (!is_charged(mat)) return;
+
+    float q = particle_charge[p];
+    if (abs(q) < 1e-5) return;
+
+    vec2 pos = positions[p];
+    vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return;
+
+    vec4 E = texture(u_e_field_tex, uv);
+    vec2 f_coulomb = q * E.xy * u_force_scale;
+
+    // Cap per-frame acceleration so a super-charged clump can't blow up
+    // the integrator. 28 m/s^2 ~= 2.9g, comparable to heavy-ferro max.
+    float fm = length(f_coulomb);
+    const float F_MAX = 28.0;
+    if (fm > F_MAX) f_coulomb *= F_MAX / fm;
+
+    velocities[p] += f_coulomb * u_dt;
+}

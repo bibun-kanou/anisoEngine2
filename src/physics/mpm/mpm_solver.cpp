@@ -798,9 +798,13 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
                               mp_params.ambient_H.y * mp_params.ambient_H.y);
         g2p_shader_.set_float("u_magnetic_ambient_mag", amb);
         g2p_shader_.set_float("u_magnetic_cursor_strength", std::abs(mp_params.cursor_strength));
-        // Scene-active gate: Real Magnetics on => scene SDF sources may
-        // contribute non-self gradients, so pass force through.
-        g2p_shader_.set_int("u_magnetic_scene_active", mp_params.enabled ? 1 : 0);
+        // Scene-active gate: only pass full force through when Real
+        // Magnetics is on AND there's actually a magnetic SDF object in
+        // the scene. Without a real source, the particles' own self-field
+        // is the only drive, and the gate must stay damping so dipole-
+        // dipole self-feedback can't run away into a point collapse.
+        bool real_magnet_present = mp_params.enabled && magnetic->has_scene_magnet_sources();
+        g2p_shader_.set_int("u_magnetic_scene_active", real_magnet_present ? 1 : 0);
         // Persistent magnetization SSBO binding to g2p used to happen
         // here for chain formation, but that feature moved out (SSBO
         // cap). Still bound for magnetic_particles.comp — see

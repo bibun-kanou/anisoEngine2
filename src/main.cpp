@@ -6831,9 +6831,9 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
         if (g_show_mag_field_overlay) {
             ImGui::SliderFloat("Field Exposure", &g_mag_field_exposure, 0.1f, 500.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier on the sampled |H| before tone mapping. Crank it up (into the hundreds) to see weak ferrofluid-induced fields; real scene magnets usually only need ~5-20.");
-            // Keep the solver running each frame so the overlay always has a
-            // live field to draw, even without holding M or arming Real Magnetics.
-            g_magnetic.params().debug_force_active = true;
+            // debug_force_active is now computed once per frame in the
+            // main loop from g_show_mag_field_overlay + g_ambient_field_enabled
+            // — no need to set it here.
         }
 
         // Ambient Field — Earth-analog uniform background H. Without this,
@@ -6849,11 +6849,11 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Magnitude of the uniform H. Typical values: 1-3 for a subtle background, 5-15 for visible Rosensweig spikes, 20+ for very dense columnar ferrofluid patterns.");
             ImGui::SliderFloat("Ambient Angle", &g_ambient_field_angle_deg, 0.0f, 360.0f, "%.0f deg");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Direction of the uniform H. 0=right, 90=up, 180=left, 270=down (worldspace). Most scenes look natural with 90 (spikes grow upward).");
-            // Write the ambient_H param from strength+angle, and keep the
-            // solver running so the overlay + ferrofluid see it each frame.
+            // Write the ambient_H param from strength+angle. The solver
+            // auto-runs each frame via debug_force_active (computed in
+            // the main loop from g_ambient_field_enabled).
             float rad = g_ambient_field_angle_deg * 3.14159265358979f / 180.0f;
             g_magnetic.params().ambient_H = ng::vec2(std::cos(rad), std::sin(rad)) * g_ambient_field_strength;
-            g_magnetic.params().debug_force_active = true;
         } else {
             g_magnetic.params().ambient_H = ng::vec2(0.0f, 0.0f);
         }
@@ -6869,7 +6869,6 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
             ImGui::SliderFloat("E Angle", &g_ambient_E_angle_deg, 0.0f, 360.0f, "%.0f deg");
             float rad = g_ambient_E_angle_deg * 3.14159265358979f / 180.0f;
             g_electrostatic.params().ambient_E = ng::vec2(std::cos(rad), std::sin(rad)) * g_ambient_E_strength;
-            g_electrostatic.params().debug_force_active = true;
         } else {
             g_electrostatic.params().ambient_E = ng::vec2(0.0f, 0.0f);
         }
@@ -6964,7 +6963,7 @@ static void draw_whats_new_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool f
         mat_row("Positive Ion Cloud",   ImVec4(0.95f, 0.55f, 0.30f, 1.0f), "q = +1, flows along E");
         mat_row("Negative Ion Cloud",   ImVec4(0.40f, 0.60f, 0.95f, 1.0f), "q = -1, flows against E");
         mat_row("Triboelectric Rubber", ImVec4(0.62f, 0.52f, 0.88f, 1.0f), "Neutral solid, future contact charging");
-        ImGui::TextDisabled("NOTE: Coulomb force on particles is temporarily disabled (driver SSBO cap hit in mpm_g2p). Will return as a dedicated compute pass.");
+        ImGui::TextDisabled("Coulomb force runs as a dedicated post-MPM compute pass (electrostatic_force.comp) so it stays under the driver SSBO cap.");
     }
 
     if (ImGui::CollapsingHeader("XPBD rope system")) {
@@ -8529,6 +8528,15 @@ int main(int, char**) {
         }
 
         // --- Physics ---
+        // Recompute debug_force_active from UI state. Previously this was
+        // only SET (=true) by the UI checkboxes that want to force the
+        // solver on, and never reset — so unchecking "Real Magnetics" after
+        // toggling "Show Magnetic Field" left the solver stuck running
+        // (the reason users reported "can't turn it off"). Each frame we
+        // recompute it from the persistent UI toggle flags.
+        g_magnetic.params().debug_force_active =
+            g_show_mag_field_overlay || g_ambient_field_enabled;
+        g_electrostatic.params().debug_force_active = g_ambient_E_enabled;
         g_magnetic.step(g_sdf, &g_particles);
         g_electrostatic.step(g_sdf, &g_particles);
         if (!g_paused) {
@@ -8569,6 +8577,12 @@ int main(int, char**) {
                        mouse_force.world_pos, mouse_force.radius, mouse_force.force,
                        mouse_force.drag_dir, mouse_force.mode, mouse_force.inner_radius,
                        mouse_force.damping);
+            // Electrostatic Coulomb force — applies F = qE to charged
+            // particle velocities as a post-MPM pass. Separate from
+            // mpm_g2p because that shader is already at the driver SSBO
+            // cap; this one declares only the 4 buffers it touches.
+            // No-op when the solver is inactive.
+            g_electrostatic.apply_coulomb_force(g_particles, physics_dt);
             // XPBD constraint solve — runs after MPM has moved positions by
             // v*dt. Corrects rope/cloth particles to satisfy distance
             // constraints. No-op if no constraints are registered.

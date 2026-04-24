@@ -60,6 +60,12 @@ public:
     // Called from MPMSolver::spawn_from_positions for charged materials.
     void init_charges(u32 global_offset, const f32* values, u32 count);
 
+    // Apply the Coulomb force F = qE to charged particles as a post-MPM
+    // pass. Separate from mpm_g2p because that shader is already at the
+    // driver SSBO cap on some hardware; here we only need the 4 buffers
+    // this pass actually touches.
+    void apply_coulomb_force(ParticleBuffer& particles, f32 dt);
+
     ivec2 resolution() const { return resolution_; }
     vec2 world_min() const { return world_min_; }
     vec2 world_max() const { return world_max_; }
@@ -94,6 +100,7 @@ private:
     ComputeShader compose_shader_;
     ComputeShader jacobi_shader_;
     ComputeShader field_shader_;
+    ComputeShader force_shader_;
 };
 
 } // namespace ng
