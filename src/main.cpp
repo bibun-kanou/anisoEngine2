@@ -298,6 +298,7 @@ static bool g_show_backends_window = false;
 static bool g_show_appearance_window = false;
 static bool g_show_advanced_window = false;
 static bool g_show_presets_window = false;
+static bool g_show_whats_new_window = true;  // opens on first launch so users see recent additions
 static int g_magnetic_debug_view = 0;
 static const ImVec4 kInteractionAccent(0.30f, 0.60f, 0.96f, 0.95f);
 static const ImVec4 kEnvironmentAccent(0.22f, 0.74f, 0.86f, 0.95f);
@@ -305,6 +306,7 @@ static const ImVec4 kBackendsAccent(0.19f, 0.68f, 0.54f, 0.95f);
 static const ImVec4 kAppearanceAccent(0.76f, 0.48f, 0.22f, 0.95f);
 static const ImVec4 kAdvancedAccent(0.64f, 0.34f, 0.78f, 0.95f);
 static const ImVec4 kPresetsAccent(0.84f, 0.62f, 0.18f, 0.95f);
+static const ImVec4 kWhatsNewAccent(0.52f, 0.78f, 0.42f, 0.95f); // fresh mint green
 static const ImVec4 kActionAccent(0.44f, 0.47f, 0.56f, 0.95f);
 static const char* magnetic_cursor_field_names[] = {
     "Probe Pole",
@@ -5045,6 +5047,7 @@ static UiWinRect g_rect_backends;
 static UiWinRect g_rect_appearance;
 static UiWinRect g_rect_advanced;
 static UiWinRect g_rect_presets;
+static UiWinRect g_rect_whats_new;
 
 // Scan left-to-right, top-to-bottom for a position where a new window of
 // `size` does not overlap any of `occupied`. When overlapping the X interval
@@ -5170,6 +5173,8 @@ static void draw_ui_top_bar(ng::f32 frame_ms) {
     draw_window_toggle_button("Advanced", &g_show_advanced_window, kAdvancedAccent);
     ImGui::SameLine();
     draw_window_toggle_button("Presets", &g_show_presets_window, kPresetsAccent);
+    ImGui::SameLine();
+    draw_window_toggle_button("What's New", &g_show_whats_new_window, kWhatsNewAccent);
     ImGui::SameLine();
     bool reset_proxy = false;
     draw_window_toggle_button("Reset", &reset_proxy, kActionAccent);
@@ -6899,6 +6904,97 @@ static void draw_appearance_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool 
         ImGui::Checkbox("Pipeline Viewer", &g_show_pipeline);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interactive diagram of all physics passes and their couplings.");
     }
+
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+    pop_panel_style();
+}
+
+static void draw_whats_new_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool force_pos = false) {
+    if (!g_show_whats_new_window) return;
+
+    push_panel_style(accent);
+    ImGuiCond cond = force_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(size, cond);
+    if (!ImGui::Begin("What's New", &g_show_whats_new_window)) {
+        ImGui::End();
+        pop_panel_style();
+        return;
+    }
+    g_rect_whats_new = { true, ImGui::GetWindowPos(), ImGui::GetWindowSize() };
+    ImGui::PushTextWrapPos(0.0f);
+
+    ImGui::TextDisabled("Recent additions — try them from the Creation Menu (Space) under STRUCTURAL / FLUIDS (Field/Memory tab), or use hotkeys noted below.");
+    ImGui::Separator();
+
+    // Helper lambda: colored material badge + bullet
+    auto mat_row = [](const char* name, ImVec4 col, const char* blurb) {
+        ImGui::ColorButton((std::string("##sw_") + name).c_str(), col,
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoLabel,
+                           ImVec2(14, 14));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(name);
+        ImGui::SameLine(170.0f);
+        ImGui::TextDisabled("%s", blurb);
+    };
+
+    if (ImGui::CollapsingHeader("Ferrofluid expansion", ImGuiTreeNodeFlags_DefaultOpen)) {
+        mat_row("Heavy Ferrofluid",     ImVec4(0.32f, 0.28f, 0.38f, 1.0f), "Strong-coupling ferro, climbs gravity");
+        mat_row("Diamagnetic Fluid",    ImVec4(0.58f, 0.82f, 0.95f, 1.0f), "Negative chi, repelled from high-|H|");
+        mat_row("Paramagnetic Mist",    ImVec4(0.82f, 0.86f, 0.96f, 1.0f), "Light aerosol, drifts along field lines");
+        mat_row("Sticky Ferrofluid",    ImVec4(0.18f, 0.16f, 0.22f, 1.0f), "High cohesion, forms globules not spikes");
+        ImGui::TextDisabled("All four share the ambient-field + cursor + scene-magnet drive gate so they respond to any external source without runaway self-collapse.");
+    }
+
+    if (ImGui::CollapsingHeader("Thermal-magnetic coupling", ImGuiTreeNodeFlags_DefaultOpen)) {
+        mat_row("Superconductor",       ImVec4(0.72f, 0.90f, 1.00f, 1.0f), "Meissner effect below ~180K — perfect diamagnet");
+        mat_row("Curie Ferromagnet",    ImVec4(0.48f, 0.42f, 0.48f, 1.0f), "Loses M sharply above ~680K, heat to demagnetize");
+        mat_row("Eddy Copper",          ImVec4(0.78f, 0.46f, 0.22f, 1.0f), "Non-magnetic conductor, heats from |v|^2*|H|^2");
+        mat_row("Hard Magnet",          ImVec4(0.24f, 0.22f, 0.34f, 1.0f), "Persistent M via M_prev SSBO — charge with M, stays magnetized");
+    }
+
+    if (ImGui::CollapsingHeader("New constitutive models")) {
+        mat_row("Granular Sand",        ImVec4(0.88f, 0.78f, 0.50f, 1.0f), "Drucker-Prager plasticity (Klar 2016), 35 deg friction cone");
+        mat_row("Phase Brittle",        ImVec4(0.82f, 0.86f, 0.92f, 1.0f), "Phase-field fracture with (1-d)^2 stress degradation");
+    }
+
+    if (ImGui::CollapsingHeader("Electrostatic solver (new physics axis)")) {
+        ImGui::TextDisabled("Poisson-based E-field solver mirroring the magnetic one. Ambient E-field slider lives in Environment > Overlays / Debug.");
+        mat_row("Positive Ion Cloud",   ImVec4(0.95f, 0.55f, 0.30f, 1.0f), "q = +1, flows along E");
+        mat_row("Negative Ion Cloud",   ImVec4(0.40f, 0.60f, 0.95f, 1.0f), "q = -1, flows against E");
+        mat_row("Triboelectric Rubber", ImVec4(0.62f, 0.52f, 0.88f, 1.0f), "Neutral solid, future contact charging");
+        ImGui::TextDisabled("NOTE: Coulomb force on particles is temporarily disabled (driver SSBO cap hit in mpm_g2p). Will return as a dedicated compute pass.");
+    }
+
+    if (ImGui::CollapsingHeader("XPBD rope system")) {
+        mat_row("Rope Segment",         ImVec4(0.64f, 0.48f, 0.32f, 1.0f), "XPBD distance constraints, zero MPM stress");
+        ImGui::Bullet(); ImGui::TextUnformatted("Press");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.4f, 1.0f), "Y");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("at the cursor to spawn a 24-segment hanging rope.");
+        ImGui::TextDisabled("Jacobi-style parallel constraint solve with per-particle fixed-point accumulators. Cloth + bend constraints are future work.");
+    }
+
+    if (ImGui::CollapsingHeader("Field + solver controls")) {
+        ImGui::BulletText("Ambient Field (magnetic) — Earth-analog uniform H, drives ferrofluid to self-organize");
+        ImGui::BulletText("Ambient E-field — electrostatic counterpart, drives ion clouds");
+        ImGui::BulletText("Solver Strength tree — source_scale, force_scale, jacobi iters, induction iters");
+        ImGui::BulletText("Show Magnetic Field overlay with exposure slider + fixed streak-phase origin");
+        ImGui::TextDisabled("All under Environment > Overlays / Debug.");
+    }
+
+    if (ImGui::CollapsingHeader("Behind the scenes")) {
+        ImGui::BulletText("Per-particle persistent M_prev SSBO (binding 22) — unlocks hysteresis, Curie memory, Meissner lag");
+        ImGui::BulletText("Anisotropic dipole chain-formation F = grad(M . H) [temp removed from g2p, coming back as dedicated pass]");
+        ImGui::BulletText("External-drive gate: ferro Kelvin force only activates when ambient / cursor / scene magnet is present — no more weak-seed runaway");
+        ImGui::BulletText("Fixed-point atomic rasterization for electrostatic charge density and XPBD position corrections");
+        ImGui::BulletText("MAT 57 soft iron susceptibility raised from 0.0018 to 0.22 — MPM soft iron now visibly responds to scene magnets");
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Total new materials: 13 (IDs 67-80). Use Creation Menu filters or the FIELD_MEMORY quick tab to find them fast.");
 
     ImGui::PopTextWrapPos();
     ImGui::End();
@@ -8736,6 +8832,7 @@ int main(int, char**) {
             const ImVec2 appearance_size(350.0f, 650.0f);
             const ImVec2 advanced_size(360.0f, 700.0f);
             const ImVec2 presets_size(340.0f, 230.0f);
+            const ImVec2 whats_new_size(420.0f, 560.0f);
 
             // Track previous-frame open state per window. When a window
             // transitions hidden -> shown, we pick a fresh slot via
@@ -8748,6 +8845,7 @@ int main(int, char**) {
             static bool prev_show_appearance  = false;
             static bool prev_show_advanced    = false;
             static bool prev_show_presets     = false;
+            static bool prev_show_whats_new   = false;
             auto just_opened = [](bool show, bool& prev) {
                 bool opened = show && !prev;
                 prev = show;
@@ -8764,11 +8862,12 @@ int main(int, char**) {
             // own stale/prev-frame entry.
             const UiWinRect* all_rects[] = {
                 &g_rect_interaction, &g_rect_environment, &g_rect_backends,
-                &g_rect_appearance,  &g_rect_advanced,    &g_rect_presets
+                &g_rect_appearance,  &g_rect_advanced,    &g_rect_presets,
+                &g_rect_whats_new
             };
             auto others_of = [&](const UiWinRect* self) {
                 std::vector<const UiWinRect*> v;
-                v.reserve(5);
+                v.reserve(6);
                 for (const UiWinRect* r : all_rects) if (r != self) v.push_back(r);
                 return v;
             };
@@ -8817,6 +8916,12 @@ int main(int, char**) {
                                 : ImVec2(0, 0);
                 draw_presets_window(pos, presets_size, kPresetsAccent, fp);
             } else { hide_rect(prev_show_presets, g_rect_presets); }
+            if (g_show_whats_new_window) {
+                bool fp = just_opened(g_show_whats_new_window, prev_show_whats_new);
+                ImVec2 pos = fp ? slot_for(g_rect_whats_new, whats_new_size)
+                                : ImVec2(0, 0);
+                draw_whats_new_window(pos, whats_new_size, kWhatsNewAccent, fp);
+            } else { hide_rect(prev_show_whats_new, g_rect_whats_new); }
         }
 
         if (g_show_pipeline_prev && !g_show_pipeline) {
