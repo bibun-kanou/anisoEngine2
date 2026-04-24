@@ -815,8 +815,8 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
     // Electrostatic coupling — binds E-field texture + per-particle charge
     // SSBO so Coulomb force F=qE gets applied to charged materials.
     if (electrostatic_) {
-        g2p_shader_.set_int("u_electric_field_tex", 10);
-        electrostatic_->bind_field_for_read(10);
+        g2p_shader_.set_int("u_electric_field_tex", 12);
+        electrostatic_->bind_field_for_read(12);
         electrostatic_->bind_charge_ssbo(24);
         const auto& ep = electrostatic_->params();
         g2p_shader_.set_int("u_use_electrostatics", electrostatic_->active() ? 1 : 0);

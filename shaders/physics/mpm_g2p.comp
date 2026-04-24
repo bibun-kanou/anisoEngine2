@@ -109,11 +109,12 @@ layout(std430, binding = 22) readonly buffer ParticleMPrev {
 // Electrostatic coupling. The E-field texture is written by the
 // ElectrostaticField solver (Poisson + grad(-phi)). Per-particle scalar
 // charge `q` drives F = qE. The separate gate uniform lets MPM run with
-// electrostatics entirely off (0 = skip). Binding 10 picked because
-// units 0-9 are already taken by SDF, magnetic, air, airtight pressure,
-// bio, and automata samplers — sharing a binding silently breaks the
-// shader so MPM particles freeze (the symptom this commit fixes).
-layout(binding = 10) uniform sampler2D u_electric_field_tex;
+// electrostatics entirely off (0 = skip).
+// HISTORY: binding 5 collided with u_airtight_pressure_tex, and binding 10
+// collided with u_bio_support_tex — both silently broke MPM because
+// GLSL lets duplicate sampler bindings through without a compile error.
+// Current value 12 is the first slot past the existing occupants 0-11.
+layout(binding = 12) uniform sampler2D u_electric_field_tex;
 uniform int u_use_electrostatics;
 uniform vec2 u_electric_world_min;
 uniform vec2 u_electric_world_max;
