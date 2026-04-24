@@ -155,9 +155,13 @@ void main() {
         // M = -H flow goes through the polarity factor plus a saturation
         // large enough that Langevin pins near its asymptote for any
         // reasonable applied H.
-        float active = smoothstep(SUPERCONDUCTOR_T_C + 8.0, SUPERCONDUCTOR_T_C - 8.0, temp);
-        saturation = 30.0 * active;
-        alpha = 5.0 * active;
+        // 'active' is a GLSL reserved keyword — use 'sc_active' so the
+        // shader compiles. Silent compile failure here was causing a
+        // downstream MPM g2p compile failure (via shared include chain)
+        // that manifested as all MPM particles frozen in space.
+        float sc_active = smoothstep(SUPERCONDUCTOR_T_C + 8.0, SUPERCONDUCTOR_T_C - 8.0, temp);
+        saturation = 30.0 * sc_active;
+        alpha = 5.0 * sc_active;
         polarity = -1.0;
     } else if (mat == MAT_CURIE_FERRO) {
         // Hard ferromagnet with a sharp Curie transition. Below T_Curie,

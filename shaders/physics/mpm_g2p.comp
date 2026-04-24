@@ -96,33 +96,16 @@ uniform float u_magnetic_cursor_strength; // |cursor_strength|
 // or ferro next to a scene magnet (without M held) would feel no force.
 uniform int   u_magnetic_scene_active;
 
-// Per-particle persistent magnetization (written by magnetic_particles.comp).
-// We read it here to compute the ANISOTROPIC dipole-dipole pair force
-// F = ∇(M · H) which, unlike the isotropic (χ/2)∇|H|² Kelvin force, gives
-// head-to-tail attraction + side-by-side repulsion between two particles
-// with aligned M. This is what produces the iconic ferrofluid chain
-// patterns (Rosensweig '85 and many SIGGRAPH ferrofluid papers).
-layout(std430, binding = 22) readonly buffer ParticleMPrev {
-    vec2 particle_m_prev[];
-};
-
-// Electrostatic coupling. The E-field texture is written by the
-// ElectrostaticField solver (Poisson + grad(-phi)). Per-particle scalar
-// charge `q` drives F = qE. The separate gate uniform lets MPM run with
-// electrostatics entirely off (0 = skip).
-// HISTORY: binding 5 collided with u_airtight_pressure_tex, and binding 10
-// collided with u_bio_support_tex — both silently broke MPM because
-// GLSL lets duplicate sampler bindings through without a compile error.
-// Current value 12 is the first slot past the existing occupants 0-11.
-layout(binding = 12) uniform sampler2D u_electric_field_tex;
-uniform int u_use_electrostatics;
-uniform vec2 u_electric_world_min;
-uniform vec2 u_electric_world_max;
-uniform float u_electric_force_scale;
-
-layout(std430, binding = 24) readonly buffer ParticleCharge {
-    float particle_charge[];
-};
+// NOTE: ferrofluid chain formation (F = ∇(M·H)) and Coulomb force (F = qE)
+// were originally inlined here via two extra SSBOs (ParticleMPrev @22 and
+// ParticleCharge @24). On drivers with a lower MAX_COMPUTE_SHADER_STORAGE_
+// BLOCKS cap (~16 on some Intel iGPUs), those two extra SSBO declarations
+// push mpm_g2p.comp past the limit and the shader fails to link with
+// C5058: "no buffers available for bindable storage buffer", freezing all
+// MPM particles because g2p silently no-ops when unlinked. Both features
+// will move to separate compute passes that each carry only the SSBOs
+// they need. For now the Coulomb/chain paths are disabled in g2p; the
+// per-particle state buffers and the solvers themselves still exist.
 uniform int   u_keep_colors;
 uniform uint  u_highlight_start; // Global index range to highlight
 uniform uint  u_highlight_end;
@@ -499,46 +482,8 @@ vec4 thermal_coupling_defaults(uint mat_type) {
     return vec4(1.0, 1.0, 1.0, 0.18);
 }
 
-// Anisotropic dipole-dipole pair force for particles carrying a persistent
-// magnetization M_p. Returns F = ∇(M_p · H) computed via 4-sample central
-// differences on the bulk H field. When a neighbor particle raises H
-// locally along the M_p direction, the gradient points toward the neighbor
-// IF M_p is aligned with the displacement (head-to-tail) — attractive along
-// the chain axis. Perpendicular to M_p, the same rasterized neighbor
-// lowers M_p·H at the particle position (the neighbor's contribution to H
-// is along M, perpendicular to r̂ → dot product smaller), so the gradient
-// points AWAY — repulsive side-by-side. That asymmetry is exactly the
-// Rosensweig chain-formation condition.
-vec2 dipole_chain_force(vec2 pos, vec2 M_p, float scale) {
-    if (u_use_real_magnetics == 0) return vec2(0.0);
-    float Mm = length(M_p);
-    if (Mm < 1e-4) return vec2(0.0);
-    ivec2 res = textureSize(u_magnetic_field_tex, 0);
-    vec2 cell = (u_magnetic_world_max - u_magnetic_world_min) / vec2(max(res, ivec2(1)));
-    float mh_l = dot(sample_magnetic_field_bulk(pos - vec2(cell.x, 0.0)).xy, M_p);
-    float mh_r = dot(sample_magnetic_field_bulk(pos + vec2(cell.x, 0.0)).xy, M_p);
-    float mh_b = dot(sample_magnetic_field_bulk(pos - vec2(0.0, cell.y)).xy, M_p);
-    float mh_t = dot(sample_magnetic_field_bulk(pos + vec2(0.0, cell.y)).xy, M_p);
-    vec2 grad_mh = vec2((mh_r - mh_l) / max(2.0 * cell.x, 1e-5),
-                        (mh_t - mh_b) / max(2.0 * cell.y, 1e-5));
-    // Scale inversely with |M_p| so the force stays bounded when particles
-    // briefly saturate to very large M (avoids runaway during peak field
-    // moments). The physical force is linear in M, but for a stable sim
-    // we want saturation-like cap.
-    return grad_mh * (scale / (1.0 + 0.15 * Mm));
-}
-
-// Coulomb force on a charged particle: F = q * E * force_scale.
-// force_scale bundles (1/ε₀-ρ)-analog factors to convert solver E units
-// into m/s² on the particle mass. Returns a cap-free force; the caller
-// clamps into the physically reasonable range.
-vec2 coulomb_force(vec2 pos, float q) {
-    if (u_use_electrostatics == 0 || abs(q) < 1e-5 || u_electric_force_scale <= 1e-5) return vec2(0.0);
-    vec2 uv = (pos - u_electric_world_min) / (u_electric_world_max - u_electric_world_min);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec2(0.0);
-    vec4 E = texture(u_electric_field_tex, uv);
-    return q * E.xy * u_electric_force_scale;
-}
+// dipole_chain_force() and coulomb_force() were removed — see note near
+// the top of this file. They'll return via dedicated compute passes.
 
 vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
     if (u_use_real_magnetics == 0 || susceptibility <= 1e-5 || u_magnetic_force_scale <= 1e-5) return vec2(0.0);
@@ -756,9 +701,11 @@ void main() {
         else if (mat_type == 69u) { susceptibility = 0.08; max_mag_force = 4.0; }   // PARA_MIST: very light, gentle drift along field lines, barely accelerates
         else if (mat_type == 70u) { susceptibility = 0.55; max_mag_force = 18.0; }  // STICKY_FERRO: strong attraction but stays cohesive — clumps into globules
         else if (mat_type == 71u) {                                                 // SUPERCONDUCTOR: Meissner — huge negative chi below T_c, zero above
-            float active_sc = smoothstep(188.0, 172.0, mag_temp);                   // matches SUPERCONDUCTOR_T_C in magnetic_particles.comp (with hysteresis band)
-            susceptibility = -1.8 * active_sc;
-            max_mag_force = 38.0 * active_sc;
+            // NB: 'active' (and any identifier starting with it on this driver)
+            // is parsed as a reserved word — using 'sc_gate' instead.
+            float sc_gate = smoothstep(188.0, 172.0, mag_temp);                     // matches SUPERCONDUCTOR_T_C in magnetic_particles.comp (with hysteresis band)
+            susceptibility = -1.8 * sc_gate;
+            max_mag_force = 38.0 * sc_gate;
         }
         else if (mat_type == 72u) {                                                 // CURIE_FERRO: ferromagnet below T_Curie, zero above
             float below_curie = smoothstep(705.0, 655.0, mag_temp);
@@ -783,38 +730,12 @@ void main() {
             }
         }
 
-        // Ferrofluid chain formation — anisotropic dipole-dipole pair force
-        // F = ∇(M_p · H). Only applies to liquid ferro materials that can
-        // actually rearrange into chains; SOLIDS with magnetic response
-        // (soft iron, rubber, hard magnet, Curie ferro, superconductor,
-        // eddy copper) keep only the standard Kelvin body force so they
-        // don't fragment along field lines.
-        bool is_fluid_ferro = (mat_type == 31u || mat_type == 67u ||
-                               mat_type == 68u || mat_type == 69u ||
-                               mat_type == 70u);
-        if (is_fluid_ferro) {
-            vec2 M_p = particle_m_prev[p];
-            // Per-material chain-force scale. Heavy ferro dominates because
-            // its saturation M is high; para mist barely chains.
-            float chain_scale;
-            if (mat_type == 67u)      chain_scale = 0.045; // HEAVY: strong chaining
-            else if (mat_type == 70u) chain_scale = 0.030; // STICKY: prefers globules over chains, mild
-            else if (mat_type == 68u) chain_scale = 0.020; // DIAMAG: chains anti-align (still pattern-forming)
-            else if (mat_type == 69u) chain_scale = 0.006; // PARA MIST: barely visible chaining
-            else                      chain_scale = 0.028; // normal ferro
-            vec2 f_chain = dipole_chain_force(pos, M_p, chain_scale);
-            // Gate with the same ext-drive signal so chains only form under
-            // a real external seed — matches the ambient/cursor/scene gate
-            // philosophy of the main Kelvin force.
-            float amb_gate = smoothstep(0.3, 3.0, u_magnetic_ambient_mag);
-            float cur_gate = smoothstep(0.002, 0.05, u_magnetic_cursor_strength);
-            float scn_gate = (u_magnetic_scene_active != 0) ? 1.0 : 0.0;
-            float chain_gate = max(max(amb_gate, cur_gate), scn_gate);
-            f_chain *= chain_gate;
-            // Cap the chain force at ~4 m/s² so it accents the Kelvin
-            // force rather than dominating it.
-            float fc_mag = length(f_chain);
-            if (fc_mag > 4.0) f_chain *= 4.0 / fc_mag;
+        // Ferrofluid chain formation (F = ∇(M·H)) was removed here — see
+        // SSBO-limit note at top of file. It will return as a dedicated
+        // compute pass that only binds ParticleMPrev + the magnetic field
+        // tex, without needing to share mpm_g2p's full SSBO set.
+        if (false) {
+            vec2 f_chain = vec2(0.0);
             new_vel += f_chain * u_dt;
         }
 
@@ -847,25 +768,11 @@ void main() {
         }
     }
 
-    // Electrostatic Coulomb force. F = qE, applied to charged particle
-    // materials only (POSITIVE_ION=77, NEGATIVE_ION=78, TRIBOELECTRIC=79).
-    // Keep in sync with the charge_rasterize.comp material gate. The per-
-    // particle q lives in particle_charge[p]; sign of q flips which way
-    // the field pulls the particle.
-    if (u_use_electrostatics != 0) {
-        bool is_charged_mat = (mat_type == 77u || mat_type == 78u || mat_type == 79u);
-        if (is_charged_mat) {
-            float q = particle_charge[p];
-            vec2 f_coulomb = coulomb_force(pos, q);
-            // Per-frame cap on Coulomb acceleration so clustering into a
-            // single super-charged blob can't explode the integrator.
-            // 28 m/s^2 ≈ 2.9g — comparable to heavy-ferro max_mag_force.
-            float fc_mag = length(f_coulomb);
-            const float F_COULOMB_MAX = 28.0;
-            if (fc_mag > F_COULOMB_MAX) f_coulomb *= F_COULOMB_MAX / fc_mag;
-            new_vel += f_coulomb * u_dt;
-        }
-    }
+    // Electrostatic Coulomb force (F = qE) was inlined here originally,
+    // but its two extra SSBOs (ParticleCharge @24 and the E-field
+    // sampler) pushed mpm_g2p.comp past the driver SSBO cap on some
+    // hardware. Moved out — will re-implement as a dedicated compute
+    // pass so charged ion materials respond to E-field again.
 
     if (u_kinematic_targets_active != 0) {
         float w = spring_weight[idx];

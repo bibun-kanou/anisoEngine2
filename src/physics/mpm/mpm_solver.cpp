@@ -801,9 +801,10 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         // Scene-active gate: Real Magnetics on => scene SDF sources may
         // contribute non-self gradients, so pass force through.
         g2p_shader_.set_int("u_magnetic_scene_active", mp_params.enabled ? 1 : 0);
-        // Persistent magnetization — for the anisotropic F = ∇(M·H) pair
-        // force that produces ferrofluid chain-formation patterns.
-        magnetic->bind_m_prev_ssbo(22);
+        // Persistent magnetization SSBO binding to g2p used to happen
+        // here for chain formation, but that feature moved out (SSBO
+        // cap). Still bound for magnetic_particles.comp — see
+        // MagneticField::step().
     } else {
         g2p_shader_.set_int("u_use_real_magnetics", 0);
         g2p_shader_.set_float("u_magnetic_force_scale", 0.0f);
@@ -812,21 +813,12 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         g2p_shader_.set_int("u_magnetic_scene_active", 0);
     }
 
-    // Electrostatic coupling — binds E-field texture + per-particle charge
-    // SSBO so Coulomb force F=qE gets applied to charged materials.
-    if (electrostatic_) {
-        g2p_shader_.set_int("u_electric_field_tex", 12);
-        electrostatic_->bind_field_for_read(12);
-        electrostatic_->bind_charge_ssbo(24);
-        const auto& ep = electrostatic_->params();
-        g2p_shader_.set_int("u_use_electrostatics", electrostatic_->active() ? 1 : 0);
-        g2p_shader_.set_vec2("u_electric_world_min", electrostatic_->world_min());
-        g2p_shader_.set_vec2("u_electric_world_max", electrostatic_->world_max());
-        g2p_shader_.set_float("u_electric_force_scale", ep.force_scale);
-    } else {
-        g2p_shader_.set_int("u_use_electrostatics", 0);
-        g2p_shader_.set_float("u_electric_force_scale", 0.0f);
-    }
+    // Electrostatic Coulomb force used to apply here via its own SSBO +
+    // sampler, but those pushed mpm_g2p.comp past the driver SSBO cap on
+    // some hardware. The ElectrostaticField solver + particle_charge_buf_
+    // still exist; the force application will move to a dedicated
+    // compute pass that only binds the buffers it needs.
+    (void)electrostatic_;
     if (air) {
         glBindTextureUnit(4, air->temp_texture());
         g2p_shader_.set_int("u_air_temp_tex", 4);
