@@ -70,6 +70,20 @@ public:
         // without any external magnet. Zero by default — toggled and tuned
         // through the "Ambient Field" UI.
         vec2 ambient_H = vec2(0.0f, 0.0f);
+
+        // Per-mechanic debug toggles. Each one disables a specific piece
+        // of the magnetic pipeline so the user can A/B which sub-mechanic
+        // is producing wrong behavior. All true by default = full physics.
+        struct Toggles {
+            bool include_scene_sources = true;     // SDF permanent + soft iron rasterization
+            bool include_cursor_brush = true;      // M-held brush rasterization
+            bool include_particle_demag = true;    // ferro M scattered into drive field
+            bool run_induction_passes = true;      // multi-iter soft-iron self-consistency
+            bool apply_kelvin_force = true;        // F = (chi/2) grad|H|^2 in mpm_g2p
+            bool apply_surface_force = true;       // ferro_surface_force capillary spikes
+            bool apply_ext_drive_gate = true;      // ambient/cursor/scene gate (vs always 1)
+            bool apply_hf_suppress = true;         // sharpness damping (vs always 1)
+        } toggles;
     };
 
     void init(const Config& config);

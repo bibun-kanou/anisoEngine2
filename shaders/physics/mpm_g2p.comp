@@ -106,6 +106,13 @@ uniform float u_magnetic_cursor_radius;
 // source_scale and stronger hf_suppress should keep self-clusters from
 // running away.
 uniform int   u_magnetic_scene_active;
+// Per-mechanic debug toggles. 0 = disabled, 1 = enabled. Used by the
+// magnetic mechanics panel so the user can isolate which sub-mechanic
+// is producing wrong behavior.
+uniform int   u_mag_apply_kelvin_force;
+uniform int   u_mag_apply_surface_force;
+uniform int   u_mag_apply_ext_drive_gate;
+uniform int   u_mag_apply_hf_suppress;
 
 // NOTE: ferrofluid chain formation (F = ∇(M·H)) and Coulomb force (F = qE)
 // were originally inlined here via two extra SSBOs (ParticleMPrev @22 and
@@ -527,6 +534,10 @@ vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
     // the clump). 4.5 + the source_scale reduction in MagneticParams
     // together keep self-collapse from running away.
     float hf_suppress = bulk_ratio / (1.0 + 4.5 * sharpness + 0.08 * grad_ratio);
+    // Toggle: when off, hf_suppress is forced to 1 so we see the raw
+    // Kelvin force without sharpness damping. Useful for verifying
+    // self-cluster is what's being suppressed.
+    if (u_mag_apply_hf_suppress == 0) hf_suppress = 1.0;
     float d = sample_sdf_distance(pos);
     float wall_gate = mix(0.22, 1.0, smoothstep(u_dx * 2.0, u_dx * 7.0, max(d, 0.0)));
     hf_suppress *= wall_gate;
@@ -556,6 +567,9 @@ vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
                                     u_magnetic_cursor_strength * cursor_proximity);
     float scene_gate   = (u_magnetic_scene_active != 0) ? 1.0 : 0.0;
     float ext_drive    = max(max(ambient_gate, cursor_gate), scene_gate);
+    // Toggle: when off, gate is forced to 1 — full Kelvin force always
+    // passes through. Lets the user see what the unrestricted force does.
+    if (u_mag_apply_ext_drive_gate == 0) ext_drive = 1.0;
     f *= ext_drive;
     // Safety clamp against solver spikes at coarse cell boundaries.
     // Real ferrofluid experiments see ~1-3g peak body-force acceleration
@@ -741,7 +755,7 @@ void main() {
         // abs() so diamagnetic (negative chi) also gets the force path.
         // magnetic_body_force produces a signed force via `f = 0.5 * chi * ...`,
         // so negative chi correctly produces repulsion away from field gradients.
-        if (abs(susceptibility) > 1e-5) {
+        if (abs(susceptibility) > 1e-5 && u_mag_apply_kelvin_force != 0) {
             vec2 mag_force = magnetic_body_force(pos, susceptibility, max_mag_force);
             new_vel += mag_force * u_dt;
             if (mat_type == 58u) {
@@ -770,7 +784,9 @@ void main() {
             float capillary_gate = (mat_type == 67u ? 0.70 : 0.42)
                                  + 0.70 * smoothstep(0.18, 1.1, hmag);
             float amplify = (mat_type == 67u) ? 3.2 : 1.1;
-            new_vel += ferro_surface_force(pos) * (capillary_gate * amplify) * u_dt;
+            if (u_mag_apply_surface_force != 0) {
+                new_vel += ferro_surface_force(pos) * (capillary_gate * amplify) * u_dt;
+            }
         }
 
         // Eddy-current heating (MAT_EDDY_COPPER). Physically: a conductor

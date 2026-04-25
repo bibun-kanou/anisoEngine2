@@ -810,6 +810,11 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         // dipole self-feedback can't run away into a point collapse.
         bool real_magnet_present = mp_params.enabled && magnetic->has_scene_magnet_sources();
         g2p_shader_.set_int("u_magnetic_scene_active", real_magnet_present ? 1 : 0);
+        // Per-mechanic debug toggles. All true = full physics.
+        g2p_shader_.set_int("u_mag_apply_kelvin_force",   mp_params.toggles.apply_kelvin_force   ? 1 : 0);
+        g2p_shader_.set_int("u_mag_apply_surface_force",  mp_params.toggles.apply_surface_force  ? 1 : 0);
+        g2p_shader_.set_int("u_mag_apply_ext_drive_gate", mp_params.toggles.apply_ext_drive_gate ? 1 : 0);
+        g2p_shader_.set_int("u_mag_apply_hf_suppress",    mp_params.toggles.apply_hf_suppress    ? 1 : 0);
         // Persistent magnetization SSBO binding to g2p used to happen
         // here for chain formation, but that feature moved out (SSBO
         // cap). Still bound for magnetic_particles.comp — see
@@ -822,6 +827,10 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         g2p_shader_.set_vec2("u_magnetic_cursor_pos", vec2(0.0f));
         g2p_shader_.set_float("u_magnetic_cursor_radius", 0.65f);
         g2p_shader_.set_int("u_magnetic_scene_active", 0);
+        g2p_shader_.set_int("u_mag_apply_kelvin_force",   1);
+        g2p_shader_.set_int("u_mag_apply_surface_force",  1);
+        g2p_shader_.set_int("u_mag_apply_ext_drive_gate", 1);
+        g2p_shader_.set_int("u_mag_apply_hf_suppress",    1);
     }
 
     // Electrostatic Coulomb force used to apply here via its own SSBO +

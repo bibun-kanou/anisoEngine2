@@ -172,11 +172,17 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         raster_shader_.set_ivec2("u_sdf_resolution", sdf.resolution());
         raster_shader_.set_uint("u_object_count", static_cast<u32>(sdf.objects().size()));
         raster_shader_.set_float("u_source_scale", params_.source_scale);
-        raster_shader_.set_float("u_rigid_permanent_scale", params_.rigid_permanent_scale);
-        raster_shader_.set_float("u_rigid_soft_scale", params_.rigid_soft_scale);
+        // Per-toggle scaling: setting include_scene_sources=false zeroes the
+        // rigid magnet contribution so we can isolate ferro self-feedback.
+        const float scene_scale = params_.toggles.include_scene_sources ? 1.0f : 0.0f;
+        raster_shader_.set_float("u_rigid_permanent_scale",
+                                 params_.rigid_permanent_scale * scene_scale);
+        raster_shader_.set_float("u_rigid_soft_scale",
+                                 params_.rigid_soft_scale * scene_scale);
         // Cursor = dragged bar magnet: injected as vector M here, not as scalar source.
-        raster_shader_.set_int("u_use_cursor",
-            std::abs(params_.cursor_strength) > 1e-4f ? 1 : 0);
+        bool cursor_active = std::abs(params_.cursor_strength) > 1e-4f
+                          && params_.toggles.include_cursor_brush;
+        raster_shader_.set_int("u_use_cursor", cursor_active ? 1 : 0);
         raster_shader_.set_vec2("u_cursor_pos", params_.cursor_pos);
         raster_shader_.set_vec2("u_cursor_dir", glm::normalize(cursor_dir));
         raster_shader_.set_float("u_cursor_inner_radius", params_.cursor_radius);
@@ -279,8 +285,13 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
     rasterize_magnetization(false, drive_field_tex_);
     solve_field_from_magnetization(drive_field_tex_);
 
-    const i32 induction_iterations = std::max(params_.induction_iterations, 0);
-    for (i32 i = 0; i < induction_iterations; ++i) {
+    // run_induction_passes toggle: when off, collapse the loop to a single
+    // pass so the user can isolate scene-magnet behavior from soft-iron
+    // self-consistency.
+    const i32 effective_induction = params_.toggles.run_induction_passes
+                                        ? std::max(params_.induction_iterations, 0)
+                                        : 0;
+    for (i32 i = 0; i < effective_induction; ++i) {
         // Scene drive field: permanent magnets + induced soft SDF. On the final
         // induction iteration we fold in particle (ferrofluid) magnetization so
         // the drive field particles actually read contains the demagnetizing
@@ -288,7 +299,7 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
         // spacing is not self-regulated — spikes can pack denser than physical
         // or collapse under perturbation because there's no magnetic volume cost.
         rasterize_magnetization(true, drive_field_tex_);
-        if (i == induction_iterations - 1) {
+        if (i == effective_induction - 1 && params_.toggles.include_particle_demag) {
             // Read-only during induction — we only want ONE state update
             // per frame, on the final debug/visual pass below.
             rasterize_particle_magnetization(drive_field_tex_, false);
@@ -298,15 +309,19 @@ void MagneticField::step(const SDFField& sdf, ParticleBuffer* particles) {
 
     // If the user configured zero induction iterations, still add one pass that
     // folds in particle magnetization so drive includes demag feedback.
-    if (induction_iterations == 0) {
+    if (effective_induction == 0) {
         rasterize_magnetization(true, drive_field_tex_);
-        rasterize_particle_magnetization(drive_field_tex_, false);
+        if (params_.toggles.include_particle_demag) {
+            rasterize_particle_magnetization(drive_field_tex_, false);
+        }
         solve_field_from_magnetization(drive_field_tex_);
     }
 
     // Debug/visual field: scene drive plus induced particle magnetization.
     // write_state=true — this is the final particle pass per frame, so
     // persistent M is updated once here, preserving hysteresis/remanence.
+    // Even when include_particle_demag is off we still run this pass so
+    // M_prev gets updated (so toggling the gate back on resumes cleanly).
     rasterize_magnetization(true, drive_field_tex_);
     rasterize_particle_magnetization(drive_field_tex_, true);
     solve_field_from_magnetization(field_tex_);

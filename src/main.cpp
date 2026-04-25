@@ -7106,6 +7106,39 @@ static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool fo
         ImGui::SliderFloat("Rigid Perm Scale", &mag_cfg.rigid_permanent_scale, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Rigid Soft Scale", &mag_cfg.rigid_soft_scale, 0.0f, 1.0f, "%.2f");
         ImGui::TextDisabled("Hold M for the temporary brush field. Probe Pole, Bar Magnet, Wide Pole, and Horseshoe stay available as quick cursor presets.");
+
+        // Per-mechanic debug toggles. Each one disables a specific piece
+        // of the magnetic pipeline so you can A/B which sub-mechanic is
+        // producing wrong behavior. Especially useful when ferrofluid is
+        // doing something unexpected — turn off Kelvin force to see
+        // surface-tension-only behavior, turn off particle demag to
+        // isolate scene-magnet response from self-feedback, etc.
+        if (ImGui::TreeNode("Mechanic Toggles (debug)")) {
+            ImGui::TextDisabled("Each checkbox disables one piece of the magnetic pipeline. All on = full physics. Useful for A/B isolating which sub-mechanic is misbehaving.");
+            auto& t = mag_cfg.toggles;
+            ImGui::Checkbox("Scene magnet rasterization", &t.include_scene_sources);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: SDF magnets and soft iron are zeroed out from the rasterized magnetization. Ferrofluid sees only its own demag + ambient + cursor.");
+            ImGui::Checkbox("Cursor brush (M-held field)", &t.include_cursor_brush);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: holding M no longer injects a brush field. Useful to confirm the cursor really is what's driving an observed motion.");
+            ImGui::Checkbox("Particle demag feedback", &t.include_particle_demag);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: ferrofluid M is NOT scattered into the drive field — particles see only scene + cursor + ambient, no self-feedback. THIS IS THE BIG ONE for diagnosing self-collapse: turn it off and see if ferro behaves cleanly under just external sources.");
+            ImGui::Checkbox("Soft-iron induction passes", &t.run_induction_passes);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: collapse the multi-iteration induction loop to a single pass. Soft iron won't reach self-consistent magnetization; useful for separating soft-iron concentration effects from particle demag effects.");
+            ImGui::Separator();
+            ImGui::TextDisabled("Force-application toggles (in mpm_g2p):");
+            ImGui::Checkbox("Apply Kelvin body force", &t.apply_kelvin_force);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: F = (chi/2) grad|H|^2 is skipped entirely for ferrofluid materials. They still magnetize and you can still see the field — but they don't translate. Useful to verify surface tension + gravity alone behave like a non-magnetic fluid.");
+            ImGui::Checkbox("Apply ferro surface force", &t.apply_surface_force);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: capillary spike-formation force is skipped. Ferrofluid will not form Rosensweig spikes, only flow toward field gradients.");
+            ImGui::Checkbox("Apply external-drive gate", &t.apply_ext_drive_gate);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: the ambient/cursor/scene gate is bypassed (force always passes through). Use this to see what unrestricted Kelvin force does — typically dramatic self-collapse, which confirms why the gate is needed.");
+            ImGui::Checkbox("Apply hf_suppress damping", &t.apply_hf_suppress);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: the sharpness-based force damping is bypassed. Use to see how much hf_suppress is actually contributing — typically critical for individual-particle spikes.");
+
+            if (ImGui::Button("Reset all (= full physics)")) {
+                t = ng::MagneticField::Params::Toggles{};
+            }
+        }
     }
 
     if (ImGui::CollapsingHeader("Airtight / Pressure [new]", ImGuiTreeNodeFlags_DefaultOpen)) {

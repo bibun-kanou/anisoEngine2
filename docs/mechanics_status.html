@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>noita_gish — Mechanics Status</title>
+<style>
+  body { font: 14px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif;
+         max-width: 1100px; margin: 24px auto; padding: 0 24px;
+         color: #1a1a1c; background: #f7f7f5; }
+  h1 { margin: 0 0 4px; font-size: 26px; }
+  h2 { margin-top: 36px; padding-bottom: 4px; border-bottom: 2px solid #d0d0c8;
+       font-size: 20px; }
+  h3 { margin-top: 22px; font-size: 16px; color: #333; }
+  .lede { color: #555; margin: 0 0 18px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 24px;
+            padding: 10px 14px; background: #fff; border-radius: 8px;
+            border: 1px solid #e5e5dd; font-size: 13px; }
+  .legend .b { display: inline-block; padding: 2px 8px; border-radius: 4px;
+              font-weight: 600; font-size: 12px; margin-right: 6px; }
+  .green  { background: #dff2d8; color: #1d5510; }
+  .yellow { background: #fff1c4; color: #6b4d05; }
+  .orange { background: #fcdcb8; color: #7a3f08; }
+  .red    { background: #f8d3d0; color: #7a1f1f; }
+  .gray   { background: #e2e2dd; color: #4a4a44; }
+  table { width: 100%; border-collapse: collapse; background: #fff;
+          border-radius: 8px; overflow: hidden; margin: 6px 0 14px;
+          box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+  th, td { padding: 9px 12px; text-align: left; vertical-align: top;
+           border-bottom: 1px solid #ececec; font-size: 13px; }
+  th { background: #f0f0e8; font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: 0.04em; color: #555; }
+  td.status { white-space: nowrap; width: 1%; }
+  td.id { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+          width: 1%; white-space: nowrap; color: #666; font-size: 12px; }
+  td.name { font-weight: 600; white-space: nowrap; }
+  td.notes { color: #444; }
+  .note { background: #fff7e0; border-left: 3px solid #d8b020;
+          padding: 8px 12px; border-radius: 4px; margin: 8px 0; font-size: 13px; }
+  .warn { background: #fde2dd; border-left: 3px solid #c64030;
+          padding: 8px 12px; border-radius: 4px; margin: 8px 0; font-size: 13px; }
+  code { background: #ececec; padding: 1px 5px; border-radius: 3px;
+         font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  ul { margin: 6px 0 12px; padding-left: 20px; }
+  ul li { margin: 3px 0; }
+  .toc { background: #fff; border: 1px solid #e5e5dd; border-radius: 8px;
+         padding: 12px 18px; margin: 12px 0 24px; font-size: 13px; }
+  .toc a { color: #2050b0; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .stamp { color: #777; font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h1>noita_gish — Mechanics Status Report</h1>
+<p class="lede">Honest accounting of which physics features are working, which are partially working, and which have known issues. Updated as features land or break.</p>
+<p class="stamp">Branch: <code>claude/wizardly-ardinghelli-2f45e3</code> · Last updated: 2026-04-25</p>
+
+<div class="legend">
+  <span><span class="b green">solid</span>Verified working as intended in test scenes</span>
+  <span><span class="b yellow">caveat</span>Works but has known caveats / non-physical edge cases</span>
+  <span><span class="b orange">partial</span>Implemented but some sub-feature disabled or unverified</span>
+  <span><span class="b red">broken</span>Currently producing wrong results</span>
+  <span><span class="b gray">stub</span>Material registered but real behavior is a placeholder</span>
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  &middot; <a href="#solvers">Solvers</a>
+  &middot; <a href="#magnetic">Magnetic family</a>
+  &middot; <a href="#charged">Charged family</a>
+  &middot; <a href="#fluids">Fluids</a>
+  &middot; <a href="#solids">Solids / structural</a>
+  &middot; <a href="#granular">Granular &amp; fracture</a>
+  &middot; <a href="#thermal">Thermal coupling</a>
+  &middot; <a href="#open">Open issues &amp; known limitations</a>
+</div>
+
+<h2 id="solvers">Solvers</h2>
+<table>
+  <tr><th>Solver</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="name">MPM (MLS-MPM)</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Affine particle-in-cell with SVD-based per-material constitutive branches. Supports ~80 material types. The G2P pass had a regression in the recent additions — fixed in commit <code>da9bf86</code> after a GLSL reserved-word collision and SSBO cap overflow caused silent shader-link failure.</td></tr>
+  <tr><td class="name">SPH</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Continuous surface force (CSF), thermal coupling, codimensional thin-film. Stable.</td></tr>
+  <tr><td class="name">Eulerian Air</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">MAC-grid Navier-Stokes + Boussinesq buoyancy + airtight cavity pressure + Gray-Scott reaction-diffusion automata. Multiple sub-solvers all working.</td></tr>
+  <tr><td class="name">SDF Field</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Rigid kinematic geometry (boxes, segments). Materials carry magnetic mode/strength/dir, thermal coupling, friction. <strong>SDF objects are kinematic only</strong> — they don't feel forces back from particles (no two-way coupling).</td></tr>
+  <tr><td class="name">Magnetic Poisson</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Jacobi-relaxation Poisson solver, ~52-72 iterations per frame. Solves ∇²φ = -∇·M and produces H = -∇φ. Core math is correct. Caveats below in the magnetic section.</td></tr>
+  <tr><td class="name">Electrostatic Poisson</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Reuses the magnetic Jacobi + field shaders (Poisson is Poisson). Coulomb force F = qE applied in a dedicated post-MPM compute pass. Solver math is correct; behavior verified for ambient-E-driven ion streaming. Triboelectric contact charging is a stub.</td></tr>
+  <tr><td class="name">XPBD constraints</td>
+      <td class="status"><span class="b orange">partial</span></td>
+      <td class="notes">Distance-constraint Jacobi solver with int fixed-point accumulators. Rope material (80) wired up; press <code>Y</code> to spawn. Cloth bend constraints + graph-coloring for stiffness are TODO.</td></tr>
+</table>
+
+<h2 id="magnetic">Magnetic family</h2>
+
+<div class="warn"><strong>Known issue:</strong> ferrofluid still tends to compact more than physical when an external source is present (e.g. holding M, scene magnet, ambient field). The latest commit (<code>4450a86</code>) made the cursor gate positional and reduced particle <code>source_scale</code> 24→10, which substantially reduced the runaway, but ferro near a strong source still over-clusters. Short term: tunable via Solver Strength sliders. Long term: needs proper demag-energy repulsion or per-cell M density saturation.</div>
+
+<h3>Ferrofluid liquids</h3>
+<table>
+  <tr><th>ID</th><th>Material</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="id">31</td><td class="name">Ferrofluid</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Baseline ferro-liquid via Tait EOS + Langevin magnetization. Climbs to a held cursor, forms spikes. Susceptibility 0.22, max force 14 m/s².</td></tr>
+  <tr><td class="id">67</td><td class="name">Heavy Ferrofluid</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">High saturation (14) + alpha (3.0) + susceptibility (0.90). Climbs gravity strongly, taller spikes than baseline. Caveat: prone to over-collapse when source is strong.</td></tr>
+  <tr><td class="id">68</td><td class="name">Diamagnetic Fluid</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Negative chi (-0.55), polarity = -1 in Langevin. Particles repelled from high-|H| regions; pools at edge of magnets. Visually distinct from paramagnetic ferros.</td></tr>
+  <tr><td class="id">69</td><td class="name">Paramagnetic Mist</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Light aerosol (density_scale 0.25), chi 0.08. Drifts along field lines without clumping. No surface tension to make it pool.</td></tr>
+  <tr><td class="id">70</td><td class="name">Sticky Ferrofluid</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Heavy damping (0.35/s velocity decay) + chi 0.55. Forms compact globules instead of tall spikes. Same self-collapse caveat as Heavy Ferrofluid.</td></tr>
+</table>
+
+<h3>Thermal-magnetic solids</h3>
+<table>
+  <tr><th>ID</th><th>Material</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="id">57</td><td class="name">Soft Iron (MPM particles)</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Susceptibility raised 0.0018 → 0.22 in commit <code>e15ec57</code>. Now visibly responds to scene magnets.</td></tr>
+  <tr><td class="id">58</td><td class="name">Magnetic Rubber</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Soft magnetizable solid that bends under field. Long-tested.</td></tr>
+  <tr><td class="id">71</td><td class="name">Superconductor</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Meissner effect via stateless χ = -1.8 below T_c=180K. Field expulsion shows visibly in overlay. <strong>Levitation</strong> is geometry-dependent — works as a "field cushion" pushing the block away from the magnet, but doesn't always produce the dramatic float we want. Persistent M_prev would help (replace stateless gate with hysteresis).</td></tr>
+  <tr><td class="id">72</td><td class="name">Curie Ferromagnet</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Hard magnet below T_Curie ~680K, paramagnetic above. Sharp transition (smoothstep window 50K). Heat with G to demagnetize visibly.</td></tr>
+  <tr><td class="id">73</td><td class="name">Eddy Copper</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Non-magnetic conductor heated by |v|² · |H|² · k. 2D approximation of Joule heating from eddy currents. Drag through a field to redden.</td></tr>
+  <tr><td class="id">74</td><td class="name">Hard Magnet</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Persistent magnetization via per-particle M_prev SSBO. Relaxation rate 0.3/s — exposure → ~3s remanence. Caveat: the relaxation lerp toward Langevin target means the "permanent" magnetization decays over a few seconds even when the bar stays cool. Real hard magnets have effectively infinite remanence below T_Curie. Long-term fix: switch to Preisach hysteresis loop.</td></tr>
+</table>
+
+<h3>Mechanics inside the magnetic Kelvin-force path</h3>
+<table>
+  <tr><th>Mechanic</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="name">External-drive gate</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Damps Kelvin force unless ambient_H, cursor (proximity-weighted), or a scene magnet is present. Cursor gate is positional as of <code>4450a86</code>. Scene gate is still binary global — if a scene magnet exists anywhere, the gate is fully open everywhere. Result: ferro far from a magnet still gets self-feedback unclamped.</td></tr>
+  <tr><td class="name">hf_suppress (sharpness damp)</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Damps Kelvin force when the local field is much sharper than the bulk. Sharpness coefficient bumped 2.1 → 4.5 in <code>4450a86</code>. Effective for individual-particle spikes; medium-sized clumps still slip through somewhat.</td></tr>
+  <tr><td class="name">Kelvin body force</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">F = (χ/2) ∇|H|² applied to magnetic particles. Math is correct but ISOTROPIC — pulls particles toward any high-|H| region, including ones created by their own clustering (this is the dipole-dipole self-feedback issue).</td></tr>
+  <tr><td class="name">Anisotropic chain force F = ∇(M·H)</td>
+      <td class="status"><span class="b red">broken</span></td>
+      <td class="notes">Implemented in <code>c2b0f76</code>, then disabled in <code>da9bf86</code> when its SSBO pushed mpm_g2p past the driver cap. Will return as a dedicated post-MPM compute pass — same approach as Coulomb.</td></tr>
+  <tr><td class="name">ferro_surface_force</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Capillary-style spike formation for fluid ferro materials. Active for FERRO_FLUID, HEAVY_FERRO, STICKY_FERRO. Long-tested.</td></tr>
+  <tr><td class="name">Demag feedback (particle M rasterized into drive field)</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Rasterized on the final induction iteration so particles see each other's contribution self-consistently.</td></tr>
+  <tr><td class="name">Persistent M_prev SSBO + relaxation</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Per-particle vec2 magnetization carried across frames with per-material relaxation rate. Enables hysteresis, Curie memory, Meissner thermal lag.</td></tr>
+  <tr><td class="name">Ambient field (uniform background H)</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Earth-analog uniform contribution added in magnetic_field.comp. Drives ferrofluid to self-organize without any scene magnet. Works correctly.</td></tr>
+</table>
+
+<h2 id="charged">Charged / electrostatic family</h2>
+<table>
+  <tr><th>ID</th><th>Material</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="id">77</td><td class="name">Positive Ion Cloud</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">q = +1, Tait fluid EOS. Streams along ambient E direction. Coulomb force runs via a dedicated post-MPM compute pass.</td></tr>
+  <tr><td class="id">78</td><td class="name">Negative Ion Cloud</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Mirror of positive — q = -1, streams against E.</td></tr>
+  <tr><td class="id">79</td><td class="name">Triboelectric Rubber</td>
+      <td class="status"><span class="b gray">stub</span></td>
+      <td class="notes">Material registered with q = 0. Charges via contact friction is <strong>not yet implemented</strong> — the per-particle charge stays at zero. Currently behaves as a neutral rubber-like solid.</td></tr>
+</table>
+
+<h3>Mechanics</h3>
+<table>
+  <tr><th>Mechanic</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="name">Poisson solver (∇²φ = -ρ/ε₀)</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Reuses the magnetic Jacobi + field shaders unchanged. Convergence verified.</td></tr>
+  <tr><td class="name">Charge rasterization</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Bilinear-weighted fixed-point atomic deposit, identical pattern to magnetic.</td></tr>
+  <tr><td class="name">Coulomb force F = qE</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Dedicated post-MPM compute pass (<code>electrostatic_force.comp</code>). 28 m/s² per-frame cap on acceleration to prevent integrator blowup.</td></tr>
+  <tr><td class="name">Triboelectric contact charging</td>
+      <td class="status"><span class="b gray">stub</span></td>
+      <td class="notes">Not implemented. Need contact-detection + charge-transfer rules. ~150 LOC follow-up.</td></tr>
+  <tr><td class="name">Ambient E-field</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Uniform background E contribution, mirror of ambient_H.</td></tr>
+</table>
+
+<h2 id="fluids">Fluids</h2>
+<p>SPH and MPM-fluid materials. Most have been long-tested.</p>
+<table>
+  <tr><th>ID</th><th>Material</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="id">SPH</td><td class="name">SPH Water / Oil / etc.</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">CSF surface tension, viscosity, thermal coupling. Long-stable.</td></tr>
+  <tr><td class="id">15</td><td class="name">MPM Fluid (Tait)</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Weakly-compressible Tait EOS. Used as base for ferro variants.</td></tr>
+  <tr><td class="id">16</td><td class="name">Flammable Fluid</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Tait + ignition + burn-rate chemistry. Long-stable.</td></tr>
+</table>
+
+<h2 id="solids">Solids / structural</h2>
+<p>Standard MPM constitutive: elastic, fracture, hardening, ceramic, composite, etc. All long-tested. <a href="technique_guide.html">See technique_guide.html</a> for details on each.</p>
+
+<h2 id="granular">Granular &amp; fracture</h2>
+<table>
+  <tr><th>ID</th><th>Material</th><th>Status</th><th>Notes</th></tr>
+  <tr><td class="id">75</td><td class="name">Granular Sand</td>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Drucker-Prager elastoplasticity (Klar 2016 simplified) with 35° friction cone. Forms angle-of-repose pile correctly when given enough material — needs ≥1m³ of sand to make a visible cone, the original showcase scene was too narrow.</td></tr>
+  <tr><td class="id">76</td><td class="name">Phase-Field Brittle</td>
+      <td class="status"><span class="b yellow">caveat</span></td>
+      <td class="notes">Energy-driven damage growth + (1-d)² stress degradation. Cracks propagate along high-energy paths. <strong>Without Laplacian regularization</strong>, crack tips are slightly thicker than ideal; the AT2 PDE is a future improvement (~300 LOC).</td></tr>
+</table>
+
+<h2 id="thermal">Thermal coupling</h2>
+<p>Long-tested. SPH-MPM-Air-SDF cross-coupling all working. New magnetic-thermal couplings (Curie, Meissner, Eddy) are wired through and respond to heat sources.</p>
+
+<h2 id="open">Open issues &amp; known limitations</h2>
+<ul>
+  <li><strong>Ferrofluid over-collapse with strong sources</strong>: clearly the biggest pain point. Cursor gate is positional but scene gate isn't; even with reduced source_scale, ferro near a strong magnet can compact more than physical. Best fixes from cheap to expensive: per-cell M density cap, demag-energy repulsion term, proper anisotropic dipole pair force as separate pass, multi-field Poisson solve (scene-only vs scene+particles).</li>
+  <li><strong>Anisotropic chain force F = ∇(M·H)</strong>: implemented and then removed when it pushed mpm_g2p over the SSBO cap. Will return as a dedicated post-MPM compute pass.</li>
+  <li><strong>Triboelectric contact charging</strong>: stub. Material exists but charge stays zero. Need contact detection + transfer rules.</li>
+  <li><strong>SDF rigid bodies feel no forces back</strong>: scene magnets and obstacles are kinematic-only. Two-way coupling (mass, velocity, torque) is in the roadmap.</li>
+  <li><strong>Hard magnet remanence is a relaxation, not a hysteresis</strong>: persistent M decays toward Langevin target at 0.3/s. Real Preisach hysteresis would keep M flat below T_Curie even with no applied field.</li>
+  <li><strong>Phase-field fracture has no Laplacian regularization</strong>: crack tips are slightly diffuse. AT2 PDE upgrade is a follow-up.</li>
+  <li><strong>Showcase scenes are not scientifically validated</strong>: each scene description says "Expected: …", but we haven't checkpointed exactly which expected behaviors actually emerge versus need tuning. The mechanics-toggle UI is the right tool to do that — see "Roadmap" below.</li>
+</ul>
+
+<h2 id="roadmap">Roadmap (priority order)</h2>
+<ol>
+  <li><strong>Per-mechanic toggle panels</strong> — add to magnetic first, then electrostatic / MPM constitutive. Lets you isolate which sub-mechanic is producing wrong behavior. ~150-200 LOC per solver. <strong>This will dramatically improve our debugging cadence.</strong></li>
+  <li><strong>Restore anisotropic chain force</strong> as a dedicated post-MPM pass.</li>
+  <li><strong>Per-cell M density cap</strong> in the particle rasterization to prevent runaway clumping.</li>
+  <li><strong>SDF spawn from creation menu</strong> — discoverability fix for scene magnets, soft iron blocks.</li>
+  <li><strong>Two-way SDF rigid-body dynamics</strong> — biggest single change remaining; magnets feel forces from particles.</li>
+  <li><strong>Scientific validation of showcase scenes</strong> — once toggle panels exist, walk through each scene with toggles to verify the documented "expected" behavior matches reality.</li>
+</ol>
+
+<p style="margin-top: 32px; color: #888; font-size: 12px; text-align: center;">
+  This file is generated by hand and updated when features land or break.
+  When the magnetic mechanics toggle panel ships, this report should be expanded with per-toggle behavior notes.
+</p>
+
+</body>
+</html>
