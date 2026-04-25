@@ -48,7 +48,16 @@ const float SUPERCONDUCTOR_T_C = 180.0;  // "warmer" than real LN2 so typical sc
 const float CURIE_FERRO_T_C    = 680.0;  // scaled analog of iron's ~1043K; fits the thermal range in use
 
 float langevin_response(float hmag, float saturation, float alpha) {
-    float x = max(alpha * hmag, 1e-4);
+    float x = alpha * hmag;
+    // Hard zero below 1e-6. Previously this used max(x, 1e-4) to dodge
+    // the 1/tanh(0) singularity in the high-x branch — but that turned
+    // every "field-free" particle into a tiny-but-nonzero M source
+    // (~saturation/30000 each). Multiplied across thousands of particles
+    // and rasterized into the drive field, it produced a self-amplifying
+    // seed that drove ferrofluid clumping with NO external field. The
+    // linear branch x/3.0 handles small x just fine; only the high-x
+    // formula needs the divisor protection.
+    if (x < 1e-6) return 0.0;
     float L = (x < 0.12) ? (x / 3.0) : (1.0 / tanh(x) - 1.0 / x);
     return saturation * clamp(L, 0.0, 1.0);
 }

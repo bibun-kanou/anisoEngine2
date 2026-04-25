@@ -103,7 +103,8 @@
 
 <h2 id="magnetic">Magnetic family</h2>
 
-<div class="warn"><strong>Known issue:</strong> ferrofluid still tends to compact more than physical when an external source is present (e.g. holding M, scene magnet, ambient field). The latest commit (<code>4450a86</code>) made the cursor gate positional and reduced particle <code>source_scale</code> 24→10, which substantially reduced the runaway, but ferro near a strong source still over-clusters. Short term: tunable via Solver Strength sliders. Long term: needs proper demag-energy repulsion or per-cell M density saturation.</div>
+<div class="warn"><strong>Resolved (April 2026):</strong> ferrofluid was forming lumps even with NO external field. Root cause: <code>langevin_response()</code> used <code>max(α·H, 1e-4)</code> to dodge the <code>1/tanh(0)</code> singularity, which made every particle emit a tiny non-zero M (~saturation/30000) even when H was truly zero. Rasterized over thousands of particles, this self-amplified into the observed clumping. Fixed in commit on this branch: hard zero below x=1e-6, only the high-x branch keeps the divisor protection. <strong>Now: with no external source, ferrofluid is just a viscous fluid (correct, matches real physics). With ambient/cursor/scene source, it magnetizes and forms patterns.</strong></div>
+<div class="note"><strong>Remaining caveat:</strong> ferro still tends to compact more than physical when a strong external source is present (cursor near a pond, scene magnet nearby). The cursor gate is positional as of commit <code>4450a86</code>; <code>source_scale</code> reduced 24→10. Use the new Mechanic Toggles panel (Backends → Magnetics) to A/B which sub-mechanic is over-attractive in your specific scene.</div>
 
 <h3>Ferrofluid liquids</h3>
 <table>
