@@ -36,7 +36,15 @@ public:
         // unchanged whether or not debug is on, because the solved
         // field is read by the same G2P Kelvin force path.
         bool debug_force_active = false;
-        f32 source_scale = 24.0f;
+        // Particle self-rasterized-M scale. Was 24 — but at that magnitude
+        // ferrofluid particles' contribution to the Poisson-solved H field
+        // dominated any far-field external source, so the dipole-dipole
+        // self-attraction at clusters overwhelmed scene-magnet gradients
+        // and the pond would compact onto itself even when the cursor /
+        // scene magnet was distant. 10 keeps cluster behavior visible
+        // (still chains, still spikes) but lets external sources actually
+        // compete with self-feedback. Tunable via Solver Strength.
+        f32 source_scale = 10.0f;
         // force_scale bundles (μ₀/ρ) conversion from solver |H|² units
         // into particle acceleration. Previously tuned to ~1 for subtle
         // behavior; now raised to 1.6 so a single moderate-strength

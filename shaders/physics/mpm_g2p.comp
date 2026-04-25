@@ -90,10 +90,21 @@ uniform float u_magnetic_force_scale;
 // passes through.
 uniform float u_magnetic_ambient_mag;     // |ambient_H|
 uniform float u_magnetic_cursor_strength; // |cursor_strength|
-// Set true when Real Magnetics is on — scene SDF magnets + soft iron etc
-// contribute to the solved field. Their gradients are inherently non-self,
-// so the gate should pass full force through whenever they might exist,
-// or ferro next to a scene magnet (without M held) would feel no force.
+// Cursor world-space position + radius — used by the POSITIONAL cursor
+// gate. Previous implementation made cursor_gate a global on/off switch,
+// so holding M anywhere immediately lifted the dipole-dipole damping for
+// every ferrofluid particle in the scene (even far ones). Result: holding
+// M near one corner caused a far-away pond to start self-collapsing
+// because its dipole-dipole self-feedback was suddenly unclamped. Gating
+// by proximity to the actual cursor fixes that.
+uniform vec2  u_magnetic_cursor_pos;
+uniform float u_magnetic_cursor_radius;
+// Set true when Real Magnetics is on AND the scene has at least one
+// magnetic SDF source. Gated globally because we can't easily compute
+// "distance to nearest scene magnet" cheaply in this shader; if scene
+// magnets exist, force is allowed through everywhere — but the lower
+// source_scale and stronger hf_suppress should keep self-clusters from
+// running away.
 uniform int   u_magnetic_scene_active;
 
 // NOTE: ferrofluid chain formation (F = ∇(M·H)) and Coulomb force (F = qE)
@@ -509,28 +520,40 @@ vec2 magnetic_body_force(vec2 pos, float susceptibility, float force_limit) {
     // Aggressively suppress near-field rigid-magnet spikes. The ferro
     // constitutive path can still use the sharper field for shaping, but
     // bulk translation should only see the low-frequency scene component.
-    float hf_suppress = bulk_ratio / (1.0 + 2.1 * sharpness + 0.08 * grad_ratio);
+    // Sharpness coefficient bumped 2.1 -> 4.5 so medium-sized particle
+    // self-clusters get damped harder. The original 2.1 only really
+    // killed individual-particle spikes; clumped puddles slipped through
+    // because their `local` and `bulk` samples were similar (both inside
+    // the clump). 4.5 + the source_scale reduction in MagneticParams
+    // together keep self-collapse from running away.
+    float hf_suppress = bulk_ratio / (1.0 + 4.5 * sharpness + 0.08 * grad_ratio);
     float d = sample_sdf_distance(pos);
     float wall_gate = mix(0.22, 1.0, smoothstep(u_dx * 2.0, u_dx * 7.0, max(d, 0.0)));
     hf_suppress *= wall_gate;
     f *= hf_suppress;
-    // External-drive gate. In the absence of a CLEAR external stimulus
-    // (strong ambient, active cursor, or scene magnets via Real Magnetics),
-    // we damp the Kelvin force so the particle-to-particle dipole-dipole
-    // attraction can't run away from a microscopic ambient seed. ANY of
-    // the three signals being strong lets the force through at full
-    // strength.
-    //   - ambient_gate: ramps in as |ambient_H| crosses 0.3 -> 3.0.
-    //     Below 0.3 the ambient is physically too weak for real
-    //     ferrofluid to macroscopically respond; above 3.0 particles
-    //     are near saturation and demag feedback is self-regulating.
-    //   - cursor_gate: ramps in as cursor_strength crosses 0.002 -> 0.05.
-    //     Small threshold because cursor is a strongly localized source.
-    //   - scene_gate: binary on/off tied to Real Magnetics. When scene
-    //     magnets are enabled, whatever gradients exist are inherently
-    //     non-self-referential; pass the force through.
+    // External-drive gate. Damps the Kelvin force when there's no clear
+    // external stimulus, so particle-to-particle dipole-dipole feedback
+    // can't run away from a microscopic ambient seed.
+    //
+    //   - ambient_gate: global, by |ambient_H|. Uniform field is a clean
+    //     external signal regardless of position.
+    //   - cursor_gate: POSITIONAL. Was previously a global on/off — that
+    //     caused holding M anywhere to immediately ungate self-feedback
+    //     for every ferrofluid particle in the scene, including far ones.
+    //     Now multiplied by a proximity factor so only particles within
+    //     ~3 cursor radii feel the cursor's effect.
+    //   - scene_gate: binary on/off when Real Magnetics is on AND a
+    //     scene magnet actually exists. Still global (can't cheaply
+    //     compute distance to nearest magnet here), but counterbalanced
+    //     by the reduced source_scale and stronger hf_suppress below.
     float ambient_gate = smoothstep(0.3, 3.0, u_magnetic_ambient_mag);
-    float cursor_gate  = smoothstep(0.002, 0.05, u_magnetic_cursor_strength);
+    float cursor_dist  = length(pos - u_magnetic_cursor_pos);
+    float cursor_falloff_r = max(u_magnetic_cursor_radius, 0.05);
+    // exp(-(d/3R)^2) ≈ 0.99 at d=R, ≈0.5 at d≈2.5R, ≈0.05 at d≈5R.
+    float cursor_proximity = exp(-(cursor_dist * cursor_dist) /
+                                 (9.0 * cursor_falloff_r * cursor_falloff_r));
+    float cursor_gate  = smoothstep(0.002, 0.05,
+                                    u_magnetic_cursor_strength * cursor_proximity);
     float scene_gate   = (u_magnetic_scene_active != 0) ? 1.0 : 0.0;
     float ext_drive    = max(max(ambient_gate, cursor_gate), scene_gate);
     f *= ext_drive;

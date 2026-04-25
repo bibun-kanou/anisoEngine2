@@ -798,6 +798,11 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
                               mp_params.ambient_H.y * mp_params.ambient_H.y);
         g2p_shader_.set_float("u_magnetic_ambient_mag", amb);
         g2p_shader_.set_float("u_magnetic_cursor_strength", std::abs(mp_params.cursor_strength));
+        g2p_shader_.set_vec2("u_magnetic_cursor_pos", mp_params.cursor_pos);
+        g2p_shader_.set_float("u_magnetic_cursor_radius",
+                              mp_params.cursor_falloff_radius > 0.0f
+                                  ? mp_params.cursor_falloff_radius
+                                  : 0.65f);
         // Scene-active gate: only pass full force through when Real
         // Magnetics is on AND there's actually a magnetic SDF object in
         // the scene. Without a real source, the particles' own self-field
@@ -814,6 +819,8 @@ void MPMSolver::sub_step_mpm(ParticleBuffer& particles, UniformGrid& grid, f32 d
         g2p_shader_.set_float("u_magnetic_force_scale", 0.0f);
         g2p_shader_.set_float("u_magnetic_ambient_mag", 0.0f);
         g2p_shader_.set_float("u_magnetic_cursor_strength", 0.0f);
+        g2p_shader_.set_vec2("u_magnetic_cursor_pos", vec2(0.0f));
+        g2p_shader_.set_float("u_magnetic_cursor_radius", 0.65f);
         g2p_shader_.set_int("u_magnetic_scene_active", 0);
     }
 
