@@ -162,8 +162,8 @@
       <td class="status"><span class="b yellow">caveat</span></td>
       <td class="notes">F = (χ/2) ∇|H|² applied to magnetic particles. Math is correct but ISOTROPIC — pulls particles toward any high-|H| region, including ones created by their own clustering (this is the dipole-dipole self-feedback issue).</td></tr>
   <tr><td class="name">Anisotropic chain force F = ∇(M·H)</td>
-      <td class="status"><span class="b red">broken</span></td>
-      <td class="notes">Implemented in <code>c2b0f76</code>, then disabled in <code>da9bf86</code> when its SSBO pushed mpm_g2p past the driver cap. Will return as a dedicated post-MPM compute pass — same approach as Coulomb.</td></tr>
+      <td class="status"><span class="b green">solid</span></td>
+      <td class="notes">Restored as a dedicated post-MPM compute pass (<code>ferro_chain_force.comp</code>) following the same pattern as the Coulomb force pass. Reads M_prev + drive_field, scatters head-to-tail-attractive / side-by-side-repulsive corrections to particle velocities. With the Langevin seeding fix, M_prev is exactly zero without an external source so chains naturally only form when ferrofluid is actually magnetized. Toggleable via the Mechanic Toggles panel.</td></tr>
   <tr><td class="name">ferro_surface_force</td>
       <td class="status"><span class="b green">solid</span></td>
       <td class="notes">Capillary-style spike formation for fluid ferro materials. Active for FERRO_FLUID, HEAVY_FERRO, STICKY_FERRO. Long-tested.</td></tr>
@@ -247,7 +247,7 @@
 <h2 id="open">Open issues &amp; known limitations</h2>
 <ul>
   <li><strong>Ferrofluid over-collapse with strong sources</strong>: clearly the biggest pain point. Cursor gate is positional but scene gate isn't; even with reduced source_scale, ferro near a strong magnet can compact more than physical. Best fixes from cheap to expensive: per-cell M density cap, demag-energy repulsion term, proper anisotropic dipole pair force as separate pass, multi-field Poisson solve (scene-only vs scene+particles).</li>
-  <li><strong>Anisotropic chain force F = ∇(M·H)</strong>: implemented and then removed when it pushed mpm_g2p over the SSBO cap. Will return as a dedicated post-MPM compute pass.</li>
+  <li><strong>Anisotropic chain force F = ∇(M·H)</strong>: <em>resolved</em> — restored as a dedicated post-MPM compute pass.</li>
   <li><strong>Triboelectric contact charging</strong>: stub. Material exists but charge stays zero. Need contact detection + transfer rules.</li>
   <li><strong>SDF rigid bodies feel no forces back</strong>: scene magnets and obstacles are kinematic-only. Two-way coupling (mass, velocity, torque) is in the roadmap.</li>
   <li><strong>Hard magnet remanence is a relaxation, not a hysteresis</strong>: persistent M decays toward Langevin target at 0.3/s. Real Preisach hysteresis would keep M flat below T_Curie even with no applied field.</li>

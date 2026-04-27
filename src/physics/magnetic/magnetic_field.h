@@ -80,6 +80,7 @@ public:
             bool include_particle_demag = true;    // ferro M scattered into drive field
             bool run_induction_passes = true;      // multi-iter soft-iron self-consistency
             bool apply_kelvin_force = true;        // F = (chi/2) grad|H|^2 in mpm_g2p
+            bool apply_chain_force = true;         // F = grad(M·H) anisotropic dipole-pair force, post-MPM pass
             bool apply_surface_force = true;       // ferro_surface_force capillary spikes
             bool apply_ext_drive_gate = true;      // ambient/cursor/scene gate (vs always 1)
             bool apply_hf_suppress = true;         // sharpness damping (vs always 1)
@@ -106,6 +107,12 @@ public:
     // SSBO binding. Used by mpm_g2p.comp to read M_prev for the
     // anisotropic dipole-dipole force (chain formation).
     void bind_m_prev_ssbo(u32 binding) const;
+
+    // Apply the anisotropic dipole-dipole pair force F = ∇(M_p · H) to
+    // liquid ferro particle velocities — the missing ingredient for real
+    // Rosensweig chain patterns. Dedicated post-MPM compute pass with a
+    // narrow SSBO set.
+    void apply_chain_force(ParticleBuffer& particles, f32 dt);
 
     vec4 sample_debug(vec2 world_pos);
     vec4 sample_total_debug(vec2 world_pos);
@@ -174,6 +181,7 @@ private:
     ComputeShader source_shader_;
     ComputeShader jacobi_shader_;
     ComputeShader field_shader_;
+    ComputeShader chain_force_shader_;
 };
 
 } // namespace ng

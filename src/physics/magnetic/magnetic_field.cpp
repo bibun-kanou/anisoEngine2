@@ -80,6 +80,7 @@ void MagneticField::init(const Config& config) {
     source_shader_.load("shaders/physics/magnetic_source.comp");
     jacobi_shader_.load("shaders/physics/magnetic_jacobi.comp");
     field_shader_.load("shaders/physics/magnetic_field.comp");
+    chain_force_shader_.load("shaders/physics/ferro_chain_force.comp");
 
     clear_textures();
 
@@ -339,6 +340,29 @@ void MagneticField::bind_total_field_for_read(u32 unit) const {
 
 void MagneticField::bind_m_prev_ssbo(u32 binding) const {
     particle_m_prev_buf_.bind_base(binding);
+}
+
+void MagneticField::apply_chain_force(ParticleBuffer& particles, f32 dt) {
+    if (!active() || dt <= 1e-6f) return;
+    if (!params_.toggles.apply_chain_force) return;
+    const auto& range = particles.range(SolverType::MPM);
+    if (range.count == 0) return;
+
+    particles.positions().bind_base(Binding::POSITION);
+    particles.velocities().bind_base(Binding::VELOCITY);
+    particles.material_ids().bind_base(Binding::MATERIAL_ID);
+    particle_m_prev_buf_.bind_base(kParticleMPrevBinding);
+
+    glBindTextureUnit(0, drive_field_tex_);
+    chain_force_shader_.bind();
+    chain_force_shader_.set_int("u_field_tex", 0);
+    chain_force_shader_.set_uint("u_offset", range.offset);
+    chain_force_shader_.set_uint("u_count", range.count);
+    chain_force_shader_.set_vec2("u_world_min", world_min_);
+    chain_force_shader_.set_vec2("u_world_max", world_max_);
+    chain_force_shader_.set_float("u_dt", dt);
+    chain_force_shader_.dispatch_1d(range.count);
+    ComputeShader::barrier_ssbo();
 }
 
 void MagneticField::bind_magnetization_for_read(u32 unit) const {

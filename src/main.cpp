@@ -7128,6 +7128,8 @@ static void draw_advanced_window(ImVec2 pos, ImVec2 size, ImVec4 accent, bool fo
             ImGui::TextDisabled("Force-application toggles (in mpm_g2p):");
             ImGui::Checkbox("Apply Kelvin body force", &t.apply_kelvin_force);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: F = (chi/2) grad|H|^2 is skipped entirely for ferrofluid materials. They still magnetize and you can still see the field — but they don't translate. Useful to verify surface tension + gravity alone behave like a non-magnetic fluid.");
+            ImGui::Checkbox("Apply chain force F=grad(M·H)", &t.apply_chain_force);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: the anisotropic dipole-dipole pair force is skipped. This is what makes ferrofluid form HEAD-TO-TAIL chain patterns rather than just clumps — turn it off and you get isotropic Kelvin attraction only. Liquid ferro materials only.");
             ImGui::Checkbox("Apply ferro surface force", &t.apply_surface_force);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("When off: capillary spike-formation force is skipped. Ferrofluid will not form Rosensweig spikes, only flow toward field gradients.");
             ImGui::Checkbox("Apply external-drive gate", &t.apply_ext_drive_gate);
@@ -8616,6 +8618,11 @@ int main(int, char**) {
             // cap; this one declares only the 4 buffers it touches.
             // No-op when the solver is inactive.
             g_electrostatic.apply_coulomb_force(g_particles, physics_dt);
+            // Anisotropic dipole-dipole pair force F = grad(M·H) on liquid
+            // ferro particles — produces real Rosensweig chain patterns
+            // (head-to-tail attraction + side-by-side repulsion). Same
+            // dedicated-pass approach so it stays under SSBO cap.
+            g_magnetic.apply_chain_force(g_particles, physics_dt);
             // XPBD constraint solve — runs after MPM has moved positions by
             // v*dt. Corrects rope/cloth particles to satisfy distance
             // constraints. No-op if no constraints are registered.

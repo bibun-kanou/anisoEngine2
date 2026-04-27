@@ -1,0 +1,109 @@
+#version 450 core
+
+// Anisotropic dipole-dipole pair force F = ∇(M_p · H), applied to liquid
+// ferro particles after MPM g2p. Distinct from the Kelvin body force
+// (χ/2)∇|H|², which is isotropic and pulls every magnetized particle
+// toward higher |H| equally. The anisotropic version here distinguishes
+// HEAD-TO-TAIL pairs (attractive along the field axis) from SIDE-BY-SIDE
+// pairs (repulsive perpendicular). That asymmetry is what produces the
+// iconic Rosensweig chain patterns in real ferrofluid.
+//
+// Originally inlined in mpm_g2p.comp (commit c2b0f76); had to move out
+// in da9bf86 because its extra SSBOs pushed mpm_g2p past the driver
+// SSBO cap. This dedicated post-g2p pass declares only the buffers it
+// actually needs (5 SSBOs + 1 sampler) so it stays comfortably below
+// any reasonable driver limit.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Positions  { vec2 positions[]; };
+layout(std430, binding = 1) buffer          Velocities { vec2 velocities[]; };
+layout(std430, binding = 7) readonly buffer MatIDs     { uint material_ids[]; };
+layout(std430, binding = 22) readonly buffer ParticleMPrev { vec2 particle_m_prev[]; };
+
+layout(binding = 0) uniform sampler2D u_field_tex;
+
+uniform uint  u_offset;
+uniform uint  u_count;
+uniform vec2  u_world_min;
+uniform vec2  u_world_max;
+uniform float u_dt;
+
+// Material gates — keep in sync with magnetic_particles.comp.
+const uint MAT_FERRO_FLUID         = 31u;
+const uint MAT_HEAVY_FERRO_FLUID   = 67u;
+const uint MAT_DIAMAGNETIC_FLUID   = 68u;
+const uint MAT_PARA_MIST           = 69u;
+const uint MAT_STICKY_FERRO        = 70u;
+
+bool is_chain_capable(uint mat) {
+    // Liquid ferro materials. Solid magnetic materials (soft iron, rubber,
+    // hard magnet, etc.) are excluded so they don't fragment along field
+    // lines.
+    return mat == MAT_FERRO_FLUID || mat == MAT_HEAVY_FERRO_FLUID ||
+           mat == MAT_DIAMAGNETIC_FLUID || mat == MAT_PARA_MIST ||
+           mat == MAT_STICKY_FERRO;
+}
+
+vec4 sample_field(vec2 pos) {
+    vec2 uv = (pos - u_world_min) / (u_world_max - u_world_min);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0);
+    return texture(u_field_tex, uv);
+}
+
+// F = ∇(M_p · H) via 4-sample central differences on the H field.
+// When a neighbor particle raises H locally along the M_p direction,
+// the gradient points TOWARD the neighbor IF M_p is aligned with the
+// displacement (head-to-tail) — attractive along the chain axis.
+// Perpendicular to M_p the same neighbor's contribution drops out of
+// the M_p · H product, so the gradient is small or repulsive there.
+vec2 dipole_chain_force(vec2 pos, vec2 M_p) {
+    float Mm = length(M_p);
+    if (Mm < 1e-4) return vec2(0.0);
+    ivec2 res = textureSize(u_field_tex, 0);
+    vec2 cell = (u_world_max - u_world_min) / vec2(max(res, ivec2(1)));
+    float mh_l = dot(sample_field(pos - vec2(cell.x, 0.0)).xy, M_p);
+    float mh_r = dot(sample_field(pos + vec2(cell.x, 0.0)).xy, M_p);
+    float mh_b = dot(sample_field(pos - vec2(0.0, cell.y)).xy, M_p);
+    float mh_t = dot(sample_field(pos + vec2(0.0, cell.y)).xy, M_p);
+    vec2 grad_mh = vec2((mh_r - mh_l) / max(2.0 * cell.x, 1e-5),
+                        (mh_t - mh_b) / max(2.0 * cell.y, 1e-5));
+    // Soft-saturation factor so peak-M moments don't produce runaway force.
+    return grad_mh / (1.0 + 0.15 * Mm);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= u_count) return;
+
+    uint p = u_offset + idx;
+    uint mat = material_ids[p];
+    if (!is_chain_capable(mat)) return;
+
+    vec2 M_p = particle_m_prev[p];
+    // With the Langevin seeding fix, M_prev is exactly zero in the absence
+    // of an external field — so this naturally returns no force without
+    // needing an explicit gate. Chains only form when the fluid is actually
+    // magnetized.
+    if (length(M_p) < 1e-4) return;
+
+    // Per-material chain-force scale. Heavy ferro chains hardest because
+    // its saturation M is high; para mist barely chains (very weak signal).
+    float chain_scale;
+    if (mat == MAT_HEAVY_FERRO_FLUID)         chain_scale = 0.045;
+    else if (mat == MAT_STICKY_FERRO)         chain_scale = 0.030;
+    else if (mat == MAT_DIAMAGNETIC_FLUID)    chain_scale = 0.020; // chains in anti-aligned direction
+    else if (mat == MAT_PARA_MIST)            chain_scale = 0.006;
+    else                                       chain_scale = 0.028; // normal ferro
+
+    vec2 pos = positions[p];
+    vec2 f = dipole_chain_force(pos, M_p) * chain_scale;
+
+    // Per-frame magnitude cap so the chain force accents rather than
+    // dominates the Kelvin force (which has its own per-material cap).
+    float fm = length(f);
+    const float F_CHAIN_MAX = 4.0;
+    if (fm > F_CHAIN_MAX) f *= F_CHAIN_MAX / fm;
+
+    velocities[p] += f * u_dt;
+}
